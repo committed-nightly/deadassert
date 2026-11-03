@@ -61,13 +61,23 @@ jobs:
           python-version: '3.12'
       - run: pip install -e .
 
-      # `diff` rather than `grep`, here and below, on purpose. This whole
-      # repository is about assertions that match less than they look like,
-      # and a whole-output assertion written as `diff` has no substring
-      # weakness to have an opinion about.
+      # Two things about every step in this job.
+      #
+      # `diff` rather than `grep`, on purpose. This whole repository is about
+      # assertions that match less than they look like, and a whole-output
+      # assertion written as `diff` has no substring weakness to have an
+      # opinion about.
+      #
+      # `set +e` before each deadassert run, also on purpose. GitHub runs
+      # steps under `bash -e {0}`, so -e is on before the script starts and
+      # `set -uo pipefail` does not turn it off -- without `set +e` the
+      # script dies on deadassert's exit 1 and never reaches `status=$?`.
+      # That cost this PR a red run, which is this repository's own subject
+      # arriving by the front door.
       - name: the shipped example prints exactly what the README quotes
         run: |
           set -uo pipefail
+          set +e
           deadassert examples/ -q > got.txt
           status=$?
           set -e
@@ -77,6 +87,7 @@ jobs:
       - name: --against turns the prefix finding into the stronger one
         run: |
           set -uo pipefail
+          set +e
           deadassert examples/ --against examples/output.txt > got.txt
           status=$?
           set -e
@@ -86,6 +97,7 @@ jobs:
       - name: every sound positive assertion in the example matches the shipped output
         run: |
           set -uo pipefail
+          set +e
           deadassert examples/ --against examples/output.txt --json > out.json
           status=$?
           set -e
@@ -96,15 +108,26 @@ jobs:
           assert found == [], f"examples/output.txt has drifted: {found}"
           PY
 
+      # `cmd; test $? -eq N` does not survive -e either: the script is gone
+      # on cmd's non-zero status before `test` is reached. Same trap as
+      # above, different punctuation.
       - name: exit codes
         run: |
-          deadassert examples/ > /dev/null; test $? -eq 1
+          set +e
           mkdir -p clean/.github/workflows  # a repo with one sound assertion
           printf \
             "'on': push\njobs:\n  j:\n    steps:\n      - run: grep -qxF 'ok' o\n" \
             > clean/.github/workflows/ci.yml
-          deadassert clean > /dev/null; test $? -eq 0
-          deadassert /nonexistent > /dev/null 2>&1; test $? -eq 2
+
+          deadassert examples/ > /dev/null;      findings=$?
+          deadassert clean > /dev/null;          sound=$?
+          deadassert /nonexistent > /dev/null 2>&1; nothing=$?
+          set -e
+
+          echo "findings=$findings sound=$sound nothing=$nothing"
+          test "$findings" -eq 1
+          test "$sound" -eq 0
+          test "$nothing" -eq 2
 
   dogfood:
     runs-on: ubuntu-latest
