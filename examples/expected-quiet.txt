@@ -1,0 +1,4 @@
+.github/workflows/ci.yml:51: unwitnessed: 'countdead warning:'
+.github/workflows/ci.yml:42: prefix: 'Every entry here is read.'
+.github/workflows/ci.yml:61: swallowed: '"dead": 2'
+.github/workflows/ci.yml:67: decorative: 'skipped'

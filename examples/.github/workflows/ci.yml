@@ -1,0 +1,79 @@
+name: ci
+
+# A worked example for deadassert, in the shape these files really come in:
+# a tool called `countdead` with a dogfood job that looks thorough. Seven of
+# the lines below are assertions. Three of those are sound; four are not, in
+# four different ways, and every one of the four is the sort of thing you
+# write on purpose and then never look at again.
+#
+# The `test $? -eq N` and `countdead ... || test $? -le 1` lines are not
+# assertions about output and deadassert says nothing about them.
+#
+# `examples/out.txt` is what `countdead examples/` prints, so that
+# `deadassert --against examples/out.txt` can decide the `prefix` kind by
+# comparison rather than by the shape of the pattern.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  dogfood:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: the summary line is what the README quotes
+        run: |
+          countdead examples/ > out.txt || test $? -le 1
+          cat out.txt
+          # Sound: -x, so appending a count to this line turns the step red.
+          grep -qxF 'Found 2 dead entries, across 3 files.' out.txt
+          # A finding kind, matched as a substring on purpose. Sound.
+          grep -qF 'never-read' out.txt
+
+      - name: a clean tree reports a clean tree
+        run: |
+          mkdir -p clean && countdead clean > clean.txt
+          # NOT sound: `prefix`. This is the whole summary line, matched with
+          # -F and no -x, so it keeps passing when the line becomes
+          # `Every entry here is read. Read 0 entries in 1 file.` -- which is
+          # the exact edit logbook#59 asks every tool in the org to make.
+          grep -qF 'Every entry here is read.' clean.txt
+
+      - name: internal diagnostics never reach stdout
+        run: |
+          countdead examples/ > out.txt || test $? -le 1
+          # NOT sound: `unwitnessed`. This promises the string stays out of
+          # stdout, and nothing anywhere asserts it can appear at all. Rename
+          # the prefix to `countdead:` and this passes forever, checking
+          # nothing. Its positive twin would have gone red immediately.
+          if grep -qF 'countdead warning:' out.txt; then
+            echo 'a diagnostic reached stdout' >&2
+            exit 1
+          fi
+
+      - name: the json mode carries the same counts
+        run: |
+          countdead examples/ --json > out.json || test $? -le 1
+          # NOT sound: `swallowed`. The `|| true` was added to get past a
+          # flake and never taken out. The step cannot fail here.
+          grep -qF '"dead": 2' out.json || true
+
+      - name: every file in the corpus was reached
+        run: |
+          countdead examples/ -v > seen.txt || test $? -le 1
+          # NOT sound: `decorative`. Reads like a check, prints either way.
+          if grep -qF 'skipped' seen.txt; then
+            echo 'some files were skipped'
+          else
+            echo 'all files read'
+          fi
+
+      - name: exit codes
+        run: |
+          # Sound, all three: the status is the assertion.
+          countdead clean > /dev/null; test $? -eq 0
+          countdead examples/ > /dev/null; test $? -eq 1
+          countdead /nonexistent > /dev/null 2>&1; test $? -eq 2
+          countdead examples/ -q | grep -qxF 'examples/a.txt:3: never-read'

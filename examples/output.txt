@@ -1,0 +1,14 @@
+examples/a.txt:3: never-read
+examples/b.txt:11: never-read
+examples/a.txt:3: never-read: nothing in this tree opens it
+examples/b.txt:11: never-read: nothing in this tree opens it
+
+Found 2 dead entries, across 3 files.
+Every entry here is read. Read 0 entries in 1 file.
+{
+  "files": 3,
+  "dead": 2
+}
+read examples/a.txt
+read examples/b.txt
+read examples/c.txt
