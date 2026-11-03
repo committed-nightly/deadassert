@@ -1,0 +1,188 @@
+name: CI
+
+'on':
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - run: pip install -e ".[dev]"
+      - run: pytest --junit-xml=results.xml
+
+      - name: the suite that pins polarity actually ran
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("results.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          total = int(suite.get("tests", 0))
+          skipped = int(suite.get("skipped", 0))
+          print(f"{total} tests, {skipped} skipped")
+          assert total >= 110, f"only {total} tests collected"
+          assert skipped == 0, f"{skipped} tests skipped"
+          PY
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      # logbook#60: `ruff check` and `ruff format --check` are different
+      # questions, and a repo that only asks the first produces a diff the
+      # moment anyone runs the project's own formatter.
+      - run: ruff format --check .
+
+  example:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+
+      # Two things about every step in this job.
+      #
+      # `diff` rather than `grep`, on purpose. This whole repository is about
+      # assertions that match less than they look like, and a whole-output
+      # assertion written as `diff` has no substring weakness to have an
+      # opinion about.
+      #
+      # `set +e` before each deadassert run, also on purpose. GitHub runs
+      # steps under `bash -e {0}`, so -e is on before the script starts and
+      # `set -uo pipefail` does not turn it off -- without `set +e` the
+      # script dies on deadassert's exit 1 and never reaches `status=$?`.
+      # That cost this PR a red run, which is this repository's own subject
+      # arriving by the front door.
+      - name: the shipped example prints exactly what the README quotes
+        run: |
+          set -uo pipefail
+          set +e
+          deadassert examples/ -q > got.txt
+          status=$?
+          set -e
+          test "$status" -eq 1
+          diff -u examples/expected-quiet.txt got.txt
+
+      - name: --against turns the prefix finding into the stronger one
+        run: |
+          set -uo pipefail
+          set +e
+          deadassert examples/ --against examples/output.txt > got.txt
+          status=$?
+          set -e
+          test "$status" -eq 1
+          diff -u examples/expected-against.txt got.txt
+
+      - name: every sound positive assertion in the example matches the shipped output
+        run: |
+          set -uo pipefail
+          set +e
+          deadassert examples/ --against examples/output.txt --json > out.json
+          status=$?
+          set -e
+          test "$status" -eq 1
+          python - <<'PY'
+          import json
+          found = json.load(open("out.json"))["not_matched"]
+          assert found == [], f"examples/output.txt has drifted: {found}"
+          PY
+
+      # `cmd; test $? -eq N` does not survive -e either: the script is gone
+      # on cmd's non-zero status before `test` is reached. Same trap as
+      # above, different punctuation.
+      - name: exit codes
+        run: |
+          set +e
+          mkdir -p clean/.github/workflows  # a repo with one sound assertion
+          printf \
+            "'on': push\njobs:\n  j:\n    steps:\n      - run: grep -qxF 'ok' o\n" \
+            > clean/.github/workflows/ci.yml
+
+          deadassert examples/ > /dev/null;      findings=$?
+          deadassert clean > /dev/null;          sound=$?
+          deadassert /nonexistent > /dev/null 2>&1; nothing=$?
+          set -e
+
+          echo "findings=$findings sound=$sound nothing=$nothing"
+          test "$findings" -eq 1
+          test "$sound" -eq 0
+          test "$nothing" -eq 2
+
+  dogfood:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+
+      # logbook#59: a dogfood step that runs the tool on a repository holding
+      # none of its subject asserts nothing, and passes while doing it. The
+      # subject here is assertions in workflow files, and this file is full of
+      # them, so the step below is one of the few in the org that cannot be
+      # vacuous. The denominator is asserted anyway, because that is the
+      # difference between a real all-clear and an empty one.
+      - name: every assertion in this repository can fail
+        run: |
+          set -euo pipefail
+          deadassert . | tee out.txt
+          grep -qxF \
+            'Every assertion here fails when the thing it names stops being true.' \
+            out.txt
+
+      # Two. Not many, and worth saying out loud rather than hiding behind a
+      # green tick: this file prefers `diff` and `test "$status"` to `grep`
+      # wherever a whole output is being checked, which is the right thing to
+      # do and also leaves this tool very little of its own subject to find.
+      # The richer corpus is `examples/`, which holds one of every kind and is
+      # checked by the `example` job above. What gives *this* step its teeth
+      # is the mutation below, not the size of the number.
+      - name: and it was measured over something
+        run: |
+          set -euo pipefail
+          deadassert . --json > out.json
+          python - <<'PY'
+          import json
+          d = json.load(open("out.json"))
+          print(f"{d['assertions']} assertions in {d['scripts']} scripts")
+          assert d["assertions"] >= 2, f"only {d['assertions']} assertions seen"
+          assert d["findings"] == [], d["findings"]
+          PY
+
+      # The assertion above is only worth anything if it can go red. Break
+      # one assertion in a copy of this file and check that it does.
+      - name: a broken assertion in this file is caught
+        run: |
+          set -euo pipefail
+          mkdir -p mutant/.github/workflows
+          sed 's/grep -qxF/grep -qF/' .github/workflows/ci.yml \
+            > mutant/.github/workflows/ci.yml
+          set +e
+          deadassert mutant > mutant.txt
+          status=$?
+          set -e
+          cat mutant.txt
+          test "$status" -eq 1
+          grep -qF 'prefix' mutant.txt

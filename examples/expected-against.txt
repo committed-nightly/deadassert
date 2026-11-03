@@ -1,0 +1,25 @@
+ci.yml:51  unwitnessed  'countdead warning:'
+    grep: passes whether or not the pattern is ever produced
+    this passes when the pattern is absent, and nothing in these workflows asserts that it
+    is ever present -- so it also passes if the pattern stops being produced at all
+      if grep -qF 'countdead warning:' out.txt; then
+
+ci.yml:42  prefix  'Every entry here is read.'
+    grep: matches a whole sentence as a substring
+    in output.txt that line reads 'Every entry here is read. Read 0 entries in 1 file.' --
+    the pattern is its opening, so this assertion is already passing over a line it does not
+    name in full, which is the edit it was written to catch
+      grep -qF 'Every entry here is read.' clean.txt
+
+ci.yml:61  swallowed  '"dead": 2'
+    grep: cannot fail the step
+    its failure is discarded, so the step passes either way
+      grep -qF '"dead": 2' out.json || true
+
+ci.yml:67  decorative  'skipped'
+    grep: cannot fail the step
+    it chooses which branch runs, and neither branch can fail the step
+      if grep -qF 'skipped' seen.txt; then
+
+4 assertions here do not check what they read as checking (1 unwitnessed, 1 prefix, 1 swallowed, 1 decorative).
+7 assertions in 6 scripts across 1 workflow file, 1 of them negated.
