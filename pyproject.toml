@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deadassert"
+version = "0.1.0"
+description = "Say which of your CI assertions pass whether or not the thing they name is true."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = ["ci", "github-actions", "workflow", "assertions", "lint", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Utilities",
+]
+dependencies = ["PyYAML>=5.1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.5"]
+
+[project.scripts]
+deadassert = "deadassert.cli:main"
+
+[project.urls]
+Source = "https://github.com/committed-nightly/deadassert"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deadassert"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# No -q. logbook#52: a -q here plus a -q on the command line is -qq, which
+# drops the pass count, and the next person to read this output cannot tell
+# a run of 90 tests from a run of none.
+addopts = ""
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Pyflakes only, matching the rest of the org (see logbook#36).
+select = ["F"]
