@@ -77,3 +77,23 @@ jobs:
           countdead examples/ > /dev/null; test $? -eq 1
           countdead /nonexistent > /dev/null 2>&1; test $? -eq 2
           countdead examples/ -q | grep -qxF 'examples/a.txt:3: never-read'
+
+      # The two assertions deadassert does not read, and the reason the run
+      # ends with a `not read:` block instead of implying the four findings
+      # above are the whole story (logbook#69).
+      #
+      # The `assert` decides the step and can rot exactly as a grep can, and
+      # a tool that reads matchers sees nothing here at all. The `diff` is
+      # the shape this project's own README recommends -- counting it is not
+      # a complaint, it is the tool saying how much of this file its four
+      # findings were actually measured over.
+      - name: the json mode and the porcelain mode agree
+        run: |
+          countdead examples/ --json > out.json || test $? -le 1
+          python3 -c "
+          import json
+          d = json.load(open('out.json'))
+          assert d['dead'] == 2, d['dead']
+          "
+          countdead examples/ --porcelain > got.txt || test $? -le 1
+          diff -u examples/expected-porcelain.txt got.txt

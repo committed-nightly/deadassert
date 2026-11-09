@@ -54,7 +54,9 @@ PY
         assert kinds(script) == ["assert", "assert"]
 
     def test_an_indented_assert_inside_a_function(self):
-        assert kinds("python3 - <<'PY'\ndef check(d):\n    assert d, d\ncheck({})\nPY") == ["assert"]
+        assert kinds("python3 - <<'PY'\ndef check(d):\n    assert d, d\ncheck({})\nPY") == [
+            "assert"
+        ]
 
     def test_a_one_liner(self):
         assert kinds("python3 -c 'assert 1 == 1'") == ["assert"]
@@ -149,7 +151,7 @@ class TestDeliberateOmissions:
         assert kinds('mytool .; s=$?\ntest "$s" -eq 1') == []
 
     def test_bracket_is_not_counted(self):
-        assert kinds('[ -f out.txt ] || exit 1') == []
+        assert kinds("[ -f out.txt ] || exit 1") == []
 
     def test_a_grep_is_not_counted_here(self):
         # `shell.scan` reads these, so counting them again would double-count

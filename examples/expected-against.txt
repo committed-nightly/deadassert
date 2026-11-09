@@ -22,4 +22,8 @@ ci.yml:67  decorative  'skipped'
       if grep -qF 'skipped' seen.txt; then
 
 4 assertions here do not check what they read as checking (1 unwitnessed, 1 prefix, 1 swallowed, 1 decorative).
-7 assertions in 6 scripts across 1 workflow file, 1 of them negated.
+7 assertions in 7 scripts across 1 workflow file, 1 of them negated. Not counted above: 2 assertions in 1 of those scripts (1 assert, 1 diff), listed below.
+
+not read:
+  ci.yml:96  assert  assert d['dead'] == 2, d['dead']
+  ci.yml:99  diff    diff -u examples/expected-porcelain.txt got.txt

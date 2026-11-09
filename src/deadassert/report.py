@@ -33,20 +33,18 @@ def _unread_tally(result: Result) -> str:
     return ", ".join(f"{count} {kind}" for kind, count in ordered)
 
 
-def _coverage(result: Result) -> str:
-    """The sentence that stops a clean run reading as a complete one.
+def _gap(result: Result) -> str:
+    """`9 assertions in 1 of those scripts (9 assert)` -- the size of the gap.
 
     logbook#69. Everything above a denominator is about the assertions this
-    tool *read*, and until this sentence existed there was nothing to say
-    that a script could also assert in a way it had not read -- which is how
-    a sweep for dead assertions walked past one in the repository it was
-    auditing. Not a finding and not in the exit code; `unread.py` evaluates
-    nothing. It is the size of the gap, stated.
+    tool *read*, and until this existed there was nothing to say that a
+    script could also assert in a way it had not read -- which is how a sweep
+    for dead assertions walked past one in the repository it was auditing.
+    Not a finding and not in the exit code; `unread.py` evaluates nothing.
     """
     return (
-        f"Not counted above: {_plural(len(result.unread), 'assertion')} this does "
-        f"not read, in {result.unread_scripts} of those scripts "
-        f"({_unread_tally(result)}). Listed below."
+        f"{_plural(len(result.unread), 'assertion')} in "
+        f"{result.unread_scripts} of those scripts ({_unread_tally(result)})"
     )
 
 
@@ -64,7 +62,7 @@ def _denominator(result: Result) -> str:
         f"{result.negated} of them negated."
     )
     if result.unread:
-        return f"{line} {_coverage(result)}"
+        return f"{line} Not counted above: {_gap(result)}, listed below."
     return line
 
 
@@ -82,7 +80,7 @@ def nothing_to_check(result: Result) -> str:
         "exit status decides a step."
     )
     if result.unread:
-        return f"{read} But {_coverage(result)}"
+        return f"{read} What it does not read: {_gap(result)}, listed below."
     return f"{read} Nothing to check."
 
 

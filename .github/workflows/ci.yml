@@ -159,16 +159,34 @@ jobs:
       # The richer corpus is `examples/`, which holds one of every kind and is
       # checked by the `example` job above. What gives *this* step its teeth
       # is the mutation below, not the size of the number.
-      - name: and it was measured over something
+      #
+      # logbook#69 is the other half of that admission, and it is now the
+      # tool's own job rather than this comment's: almost every real
+      # assertion in this file is a Python `assert` or a `diff`, deadassert
+      # reads neither, and the `unread` count is it saying so. The assertions
+      # below cannot be vacuous -- the lines they describe are in this file.
+      - name: and it was measured over something, and it says what it missed
         run: |
           set -euo pipefail
           deadassert . --json > out.json
           python - <<'PY'
           import json
           d = json.load(open("out.json"))
-          print(f"{d['assertions']} assertions in {d['scripts']} scripts")
+          print(f"{d['assertions']} assertions in {d['scripts']} scripts, "
+                f"{len(d['unread'])} not read in {d['unread_scripts']} of them")
           assert d["assertions"] >= 2, f"only {d['assertions']} assertions seen"
           assert d["findings"] == [], d["findings"]
+
+          kinds = {x["kind"] for x in d["unread"]}
+          assert "assert" in kinds, kinds
+          assert "diff" in kinds, kinds
+          assert d["unread_scripts"] >= 4, d["unread_scripts"]
+
+          # Anchored, not a substring: this is a repository about assertions
+          # that match less than they look like.
+          commands = [x["command"] for x in d["unread"]]
+          wanted = "diff -u examples/expected-quiet.txt"
+          assert any(c.startswith(wanted) for c in commands), commands
           PY
 
       # The assertion above is only worth anything if it can go red. Break
