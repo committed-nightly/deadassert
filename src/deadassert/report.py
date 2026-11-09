@@ -24,6 +24,32 @@ def _wrap(text: str, indent: str) -> str:
     return textwrap.fill(text, width=92, initial_indent=indent, subsequent_indent=indent)
 
 
+def _unread_tally(result: Result) -> str:
+    """`2 diff, 1 assert`, commonest kind first."""
+    kinds: dict[str, int] = {}
+    for _, kind, _ in result.unread:
+        kinds[kind] = kinds.get(kind, 0) + 1
+    ordered = sorted(kinds.items(), key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{count} {kind}" for kind, count in ordered)
+
+
+def _coverage(result: Result) -> str:
+    """The sentence that stops a clean run reading as a complete one.
+
+    logbook#69. Everything above a denominator is about the assertions this
+    tool *read*, and until this sentence existed there was nothing to say
+    that a script could also assert in a way it had not read -- which is how
+    a sweep for dead assertions walked past one in the repository it was
+    auditing. Not a finding and not in the exit code; `unread.py` evaluates
+    nothing. It is the size of the gap, stated.
+    """
+    return (
+        f"Not counted above: {_plural(len(result.unread), 'assertion')} this does "
+        f"not read, in {result.unread_scripts} of those scripts "
+        f"({_unread_tally(result)}). Listed below."
+    )
+
+
 def _denominator(result: Result) -> str:
     """What the verdict was measured over.
 
@@ -31,21 +57,33 @@ def _denominator(result: Result) -> str:
     apart from a verdict over nothing, and this tool is itself about
     assertions that look like they are checking something and are not.
     """
-    return (
+    line = (
         f"{_plural(len(result.assertions), 'assertion')} in "
         f"{_plural(result.scripts, 'script')} across "
         f"{_plural(len(result.files), 'workflow file')}, "
         f"{result.negated} of them negated."
     )
+    if result.unread:
+        return f"{line} {_coverage(result)}"
+    return line
 
 
 def nothing_to_check(result: Result) -> str:
-    """Said instead of an all-clear when there were no assertions at all."""
-    return (
+    """Said instead of an all-clear when there were no assertions at all.
+
+    The `unread` clause matters more here than anywhere else. A repository
+    that asserts entirely with `diff` -- which this project's own README
+    tells people to prefer -- read `Nothing to check.` before logbook#69,
+    and that was the broadest false statement the tool made.
+    """
+    read = (
         f"No assertions here. Read {_plural(result.scripts, 'run: script')} in "
         f"{_plural(len(result.files), 'workflow file')} and found no command whose "
-        "exit status decides a step. Nothing to check."
+        "exit status decides a step."
     )
+    if result.unread:
+        return f"{read} But {_coverage(result)}"
+    return f"{read} Nothing to check."
 
 
 def error_lines(result: Result) -> list[str]:
@@ -58,20 +96,26 @@ def error_lines(result: Result) -> list[str]:
     return lines
 
 
+def _tail(result: Result) -> list[str]:
+    """The blocks under every verdict: what was not matched, decided or read."""
+    out: list[str] = []
+    for block in (_absent_block, _undecided_block, _unread_block):
+        lines = block(result)
+        if lines:
+            out.append("")
+            out.extend(lines)
+    return out
+
+
 def text(result: Result, quiet: bool = False) -> str:
     if result.nothing_to_check:
-        return nothing_to_check(result)
+        return "\n".join([nothing_to_check(result), *_tail(result)])
 
     out: list[str] = []
     if not result.findings:
         out.append("Every assertion here fails when the thing it names stops being true.")
         out.append(_denominator(result))
-        if result.absent:
-            out.append("")
-            out.extend(_absent_block(result))
-        if result.undecided:
-            out.append("")
-            out.extend(_undecided_block(result))
+        out.extend(_tail(result))
         return "\n".join(out)
 
     if quiet:
@@ -99,13 +143,7 @@ def text(result: Result, quiet: bool = False) -> str:
         f"({breakdown})."
     )
     out.append(_denominator(result))
-
-    if result.absent:
-        out.append("")
-        out.extend(_absent_block(result))
-    if result.undecided:
-        out.append("")
-        out.extend(_undecided_block(result))
+    out.extend(_tail(result))
     return "\n".join(out)
 
 
@@ -117,6 +155,8 @@ def _absent_block(result: Result) -> list[str]:
     given. Worth printing either way, because it says the comparison is not
     measuring what the reader thinks.
     """
+    if not result.absent:
+        return []
     lines = [f"not matched in {result.against}:"]
     for where, pattern in result.absent:
         lines.append(f"  {where}  {pattern!r}")
@@ -124,9 +164,28 @@ def _absent_block(result: Result) -> list[str]:
 
 
 def _undecided_block(result: Result) -> list[str]:
+    if not result.undecided:
+        return []
     lines = ["not decided:"]
     for where, why in result.undecided:
         lines.append(f"  {where}  {why}")
+    return lines
+
+
+def _unread_block(result: Result) -> list[str]:
+    """Assertion-shaped constructs this tool did not read. See `unread.py`.
+
+    Separate from `not decided:` on purpose. That block is for a matcher
+    `deadassert` read and could not judge; this one is for an assertion it
+    never read at all, which is a different admission and a wider one.
+    """
+    if not result.unread:
+        return []
+    lines = ["not read:"]
+    place = max(len(where) for where, _, _ in result.unread)
+    width = max(len(kind) for _, kind, _ in result.unread)
+    for where, kind, command in result.unread:
+        lines.append(f"  {where:<{place}}  {kind:<{width}}  {command}")
     return lines
 
 
@@ -153,6 +212,8 @@ def as_json(result: Result) -> str:
             }
             for finding in result.findings
         ],
+        "unread_scripts": result.unread_scripts,
+        "unread": [{"where": w, "kind": k, "command": c} for w, k, c in result.unread],
         "undecided": [{"where": w, "why": y} for w, y in result.undecided],
         "foreign": [{"where": w, "shell": s} for w, s in result.foreign],
         "unreadable": [{"path": p, "why": y} for p, y in result.unreadable],

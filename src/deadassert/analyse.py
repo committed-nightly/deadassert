@@ -39,7 +39,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from . import shell, workflows
+from . import shell, unread, workflows
 from .shell import Assertion
 from .workflows import Script, WorkflowError
 
@@ -90,6 +90,11 @@ class Result:
     against: str | None = None
     #: Patterns `--against` showed matching nothing in the output.
     absent: list[tuple[str, str]] = field(default_factory=list)
+    #: Assertion-shaped constructs not read at all, as `(where, kind, text)`.
+    #: Never findings, and never part of the exit code: see `unread.py`.
+    unread: list[tuple[str, str, str]] = field(default_factory=list)
+    #: How many `run:` scripts hold at least one of those.
+    unread_scripts: int = 0
 
     @property
     def live(self) -> list[tuple[Script, Assertion]]:
@@ -282,6 +287,17 @@ def analyse(
             result.foreign.append((f"{os.path.basename(rel)} {label}", shell_name))
         for script in workflow.scripts:
             result.scripts += 1
+            others = unread.scan(script.body)
+            if others:
+                result.unread_scripts += 1
+            for item in others:
+                result.unread.append(
+                    (
+                        f"{os.path.basename(rel)}:{script.line_of(item.line)}",
+                        item.kind,
+                        item.text,
+                    )
+                )
             for assertion in shell.scan(script.body):
                 where = f"{os.path.basename(rel)}:{script.line_of(assertion.line)}"
                 if assertion.polarity == "undecided":
