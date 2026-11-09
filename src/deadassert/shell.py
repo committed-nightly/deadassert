@@ -215,8 +215,14 @@ def pipeline_parts(text: str) -> list[tuple[int, str]]:
     return parts
 
 
-def _matcher_head(segment: str) -> tuple[str, bool] | None:
-    """The matcher command in a simple command, and whether `!`-negated."""
+def command_head(segment: str, programs: tuple[str, ...] = MATCHERS) -> tuple[str, bool] | None:
+    """A simple command whose program is one of `programs`, and whether `!`-negated.
+
+    `programs` is a parameter because `unread` asks the same question of
+    `diff` and `jq` that this module asks of `grep`, and the fiddly part --
+    leading `VAR=value` assignments, `env`/`command` prefixes, a path to the
+    program, and a `!` that belongs to the pipeline -- is the same either way.
+    """
     text = segment.strip()
     negated = False
     while text.startswith("!"):
@@ -231,9 +237,29 @@ def _matcher_head(segment: str) -> tuple[str, bool] | None:
     match = re.match(r"([A-Za-z_][\w./-]*)", text)
     if not match:
         return None
-    if match.group(1).split("/")[-1] not in MATCHERS:
+    if match.group(1).split("/")[-1] not in programs:
         return None
     return text, negated
+
+
+def _matcher_head(segment: str) -> tuple[str, bool] | None:
+    """The matcher command in a simple command, and whether `!`-negated."""
+    return command_head(segment, MATCHERS)
+
+
+def swallows(text: str) -> bool:
+    """Whether `text` discards a command's failure with `|| true` or `|| :`."""
+    return bool(_SWALLOW.search(text))
+
+
+def in_substitution(text: str, offset: int) -> bool:
+    """Whether `offset` in `text` falls inside `$(...)` or backticks."""
+    return _in_substitution(text, offset)
+
+
+def split(text: str) -> list[str] | None:
+    """`shlex.split`, or None when the text does not tokenise."""
+    return _split(text)
 
 
 def parse_matcher(words: list[str]) -> tuple[str | None, bool, bool, bool, bool]:

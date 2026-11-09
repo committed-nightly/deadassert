@@ -84,6 +84,82 @@ class TestNothingToCheck:
         assert "Every assertion here fails" not in out
 
 
+class TestNotRead:
+    """logbook#69: a clean run over the greps is not a clean run."""
+
+    DIFFS = "mytool . > got.txt\ndiff -u expected.txt got.txt"
+
+    def test_a_repo_that_asserts_only_with_diff_no_longer_claims_nothing_to_check(
+        self, capsys, tmp_path
+    ):
+        # The broadest false statement the tool made. `diff` is what this
+        # project's own README tells people to prefer over `grep`, so a repo
+        # that took the advice got `Nothing to check.` over a file full of
+        # assertions.
+        root = repo(tmp_path, self.DIFFS)
+        code, out, _ = run(capsys, root)
+        assert "No assertions here." in out
+        assert "Nothing to check." not in out
+        assert "What it does not read: 1 assertion in 1 of those scripts (1 diff)" in out
+        assert "diff -u expected.txt got.txt" in out
+        # Still not a finding, so still not a failure.
+        assert code == 0
+
+    def test_the_clean_verdict_says_what_it_did_not_read(self, capsys, tmp_path):
+        root = repo(tmp_path, "grep -qxF 'All clear.' out.txt", self.DIFFS)
+        code, out, _ = run(capsys, root)
+        assert code == 0
+        assert "Every assertion here fails when the thing it names stops being true." in out
+        assert "1 assertion in 2 scripts across 1 workflow file, 0 of them negated." in out
+        assert "Not counted above: 1 assertion in 1 of those scripts (1 diff)" in out
+
+    def test_the_logbook_69_shape_is_named_in_a_run_that_has_findings(self, capsys, tmp_path):
+        root = repo(
+            tmp_path,
+            "if grep -qF 'kind-x' out.txt; then\n  exit 1\nfi",
+            "python3 -c \"\nimport json\nassert json.load(open('o.json'))['n'] > 5\n\"",
+        )
+        code, out, _ = run(capsys, root)
+        assert code == 1
+        assert "unwitnessed" in out
+        assert "not read:" in out
+        assert "assert json.load(open('o.json'))['n'] > 5" in out
+
+    def test_a_repo_with_nothing_unread_says_nothing_about_it(self, capsys, tmp_path):
+        root = repo(tmp_path, "grep -qxF 'All clear.' out.txt")
+        _, out, _ = run(capsys, root)
+        assert "not read:" not in out
+        assert "Not counted above" not in out
+
+    def test_quiet_stays_one_line_per_finding(self, capsys, tmp_path):
+        # `not read:` is a coverage note, not a finding, and -q is for
+        # feeding a list of findings to something else.
+        root = repo(tmp_path, "if grep -qF 'kind-x' o.txt; then\n  exit 1\nfi", self.DIFFS)
+        _, out, _ = run(capsys, root, "-q")
+        assert out.strip().splitlines() == [".github/workflows/ci.yml:7: unwitnessed: 'kind-x'"]
+
+    def test_json_carries_the_constructs_and_the_script_count(self, capsys, tmp_path):
+        root = repo(tmp_path, "grep -qxF 'All clear.' out.txt", self.DIFFS)
+        code, out, _ = run(capsys, root, "--json")
+        payload = json.loads(out)
+        assert code == 0
+        assert payload["findings"] == []
+        assert payload["unread_scripts"] == 1
+        assert payload["unread"] == [
+            {
+                "where": "ci.yml:10",
+                "kind": "diff",
+                "command": "diff -u expected.txt got.txt",
+            }
+        ]
+
+    def test_the_line_number_points_at_the_construct(self, capsys, tmp_path):
+        root = repo(tmp_path, "echo one\necho two\ndiff -u a.txt b.txt")
+        _, out, _ = run(capsys, root, "--json")
+        # `run: |` on line 6, so the script's own lines start at 7.
+        assert json.loads(out)["unread"][0]["where"] == "ci.yml:9"
+
+
 class TestDenominator:
     """logbook#59 and logbook#57: a verdict needs what it was measured over."""
 
