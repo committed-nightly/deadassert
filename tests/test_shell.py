@@ -187,3 +187,56 @@ class TestLogicalLines:
     def test_line_number_is_within_the_script(self):
         script = "set -e\n\ncat out.txt\ngrep -qF 'x' out.txt"
         assert one(script).line == 4
+
+
+class TestBraceGroups:
+    """logbook#73: a `|| { ... }` spanning lines read as `decorative`.
+
+    The four shapes below all fail the step when the pattern is absent, and
+    were checked under `bash -e` before this class was written. Any of them
+    coming out as anything but `needs-match` is a false positive on a working
+    assertion -- the mirror of what the tool exists to find.
+    """
+
+    def test_multi_line_brace_group_is_an_assertion(self):
+        script = 'echo hi | grep -qxF \'x\' || {\n    echo "no"\n    exit 1\n  }'
+        assert polarity(script) == "needs-match"
+
+    def test_single_line_brace_group_still_is(self):
+        assert polarity("echo hi | grep -qxF 'x' || { echo no; exit 1; }") == "needs-match"
+
+    def test_multi_line_and_brace_group_needs_no_match(self):
+        script = "grep -qF 'oops' out.txt && {\n    echo bad\n    exit 1\n  }"
+        assert polarity(script) == "needs-no-match"
+
+    def test_newlines_in_the_group_become_separators(self):
+        # The bug was not the joining, it was joining with a space: `_FAILING`
+        # wants an `exit` that starts a command, and `"no" exit 1` does not.
+        script = 'grep -qF \'x\' f || {\n  echo "no"\n  exit 1\n}'
+        assert one(script).text == 'grep -qF \'x\' f || { echo "no"; exit 1; }'
+
+    def test_a_group_holding_only_a_message_is_still_decorative(self):
+        # Fixing the join must not make every brace group look like a failure.
+        script = 'grep -qF \'x\' f || {\n  echo "just saying"\n}'
+        assert polarity(script) == "decorative"
+
+    def test_an_unclosed_brace_does_not_swallow_the_script(self):
+        # A `{` this miscounts -- in a heredoc, say -- must not take the rest
+        # of the file with it. Unbalanced scripts get line-at-a-time reading.
+        script = "cat <<'EOF'\n{\nEOF\ngrep -qF 'x' out.txt"
+        assert polarity(script) == "needs-match"
+
+    def test_braces_in_quotes_and_expansions_open_nothing(self):
+        assert shell.group_delta("awk '{print $1}' f") == 0
+        assert shell.group_delta('echo "${VAR}"') == 0
+        assert shell.group_delta("x=$(f); echo {") == 1
+
+    def test_if_then_at_the_top_level_is_still_its_own_line(self):
+        # `_branch_polarity` walks logical lines to find the `else`, so an
+        # `if` outside a brace group must not be joined to its body.
+        script = "if grep -qF 'oops' out.txt; then\n  exit 1\nfi"
+        assert [text for _, text in shell.logical_lines(script)] == [
+            "if grep -qF 'oops' out.txt; then",
+            "exit 1",
+            "fi",
+        ]

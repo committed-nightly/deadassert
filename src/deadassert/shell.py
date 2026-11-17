@@ -99,18 +99,165 @@ def _strip_comment(line: str) -> str:
     return "".join(out)
 
 
+#: A `{` opens a brace group only in word position. `${VAR}`, `awk '{print}'`
+#: and a brace expansion are all part of a word and open nothing.
+_GROUP_OPEN_AFTER = " \t;&|("
+
+#: A function definition: `name() {`, `function name {`, either with a body
+#: that opens on the same line. Both forms are bash; the first is POSIX.
+_FUNCTION = re.compile(
+    r"^(?:function\s+([A-Za-z_]\w*)\s*(?:\(\s*\))?|([A-Za-z_]\w*)\s*\(\s*\))\s*\{"
+)
+
+
+def group_delta(text: str) -> int:
+    """Net brace-group depth across one physical line.
+
+    Counts only a `{` or `}` that stands as a word of its own, outside quotes
+    and outside `$(...)`, `${...}` and backticks. Everything that rule leaves
+    out is there because of what the depth is used for: a logical line stays
+    open while the depth is positive, so a stray `{` that never closes would
+    swallow the rest of the script. Quote state is per line, matching
+    `_strip_comment`; a brace inside a string that spans lines is the one
+    thing this miscounts, and `logical_lines` falls back when the script does
+    not balance.
+    """
+    delta = 0
+    quote: str | None = None
+    #: Closers owed to `$(`, `${` and backticks. A brace is only a group
+    #: while this is empty.
+    stack: list[str] = []
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        if quote:
+            if ch == quote:
+                quote = None
+            index += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            index += 1
+            continue
+        if ch == "`":
+            if stack and stack[-1] == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+            index += 1
+            continue
+        if ch == "$" and index + 1 < len(text) and text[index + 1] in "({":
+            stack.append(")" if text[index + 1] == "(" else "}")
+            index += 2
+            continue
+        if ch == "(" and stack:
+            stack.append(")")
+            index += 1
+            continue
+        if ch in ")}" and stack and stack[-1] == ch:
+            stack.pop()
+            index += 1
+            continue
+        if not stack:
+            if ch == "{" and (index == 0 or text[index - 1] in _GROUP_OPEN_AFTER):
+                after = text[index + 1 : index + 2]
+                if after in ("", " ", "\t"):
+                    delta += 1
+            elif ch == "}" and (index == 0 or text[index - 1] in " \t;&("):
+                delta -= 1
+        index += 1
+    return delta
+
+
+def function_spans(script: str) -> list[tuple[int, int, str]]:
+    """`(first line, last line, name)` for each function definition.
+
+    Over physical lines, so the span is usable for reporting the line a
+    command inside the body is really on. An unclosed body runs to the end of
+    the script: that is a malformed function, and claiming it ends earlier
+    would put commands that are inside it outside.
+    """
+    spans: list[tuple[int, int, str]] = []
+    depth = 0
+    start = 0
+    name = ""
+    for number, raw in enumerate(script.split("\n"), 1):
+        body = _strip_comment(raw).rstrip()
+        if depth == 0:
+            match = _FUNCTION.match(body.strip())
+            if match:
+                start = number
+                name = match.group(1) or match.group(2)
+                depth = group_delta(body)
+                if depth <= 0:
+                    spans.append((number, number, name))
+                    depth = 0
+                continue
+            continue
+        depth += group_delta(body)
+        if depth <= 0:
+            spans.append((start, number, name))
+            depth = 0
+    if depth > 0:
+        spans.append((start, len(script.split("\n")), name))
+    return spans
+
+
+def in_function(spans: list[tuple[int, int, str]], line: int) -> str | None:
+    """The name of the function whose body holds `line`, if any."""
+    for first, last, name in spans:
+        if first <= line <= last:
+            return name
+    return None
+
+
+#: A logical line is still open after one of these: the newline that follows
+#: is not a command separator, it is whitespace before the next word.
+_OPEN = re.compile(r"(?:\|\||&&|&|\||;|\{)$")
+
+#: The same, for the keywords that can only be followed by a command list.
+#: Only consulted inside a brace group, because at the top level an `if ...;
+#: then` line is deliberately left as its own logical line for
+#: `_branch_polarity` to walk.
+_OPEN_KEYWORD = re.compile(r"(?:\bthen|\bdo|\belse|\bin)$")
+
+
 def logical_lines(script: str) -> list[tuple[int, str]]:
     """The script as logical lines, each with the 1-based line it starts on.
 
     Joins backslash continuations and lines left open by a trailing `|`, `||`,
     `&&`, `;` or `{`, because an assertion is routinely written across two
     physical lines and its polarity lives on the second one.
+
+    A brace group holds the line open until it closes, and the newlines inside
+    it are joined as the command separators they are -- logbook#73. Before
+    that, `cmd || {` joined one line and stopped, so
+
+        echo hi | grep -qxF X || {
+            echo "no"
+            exit 1
+          }
+
+    came out as `echo hi | grep -qxF X || { echo "no"`, the `exit 1` was never
+    seen, and a working assertion was reported as `decorative`. Joining with
+    `; ` rather than a space is the whole fix: `_FAILING` looks for an `exit`
+    that starts a command, and `"no" exit 1` does not.
+
+    A script whose braces do not balance gets the old line-at-a-time
+    behaviour. That is the conservative direction -- an unclosed `{`, whether
+    in a heredoc or from a brace this miscounts, would otherwise swallow every
+    line after it.
     """
+    lines = script.split("\n")
+    bodies = [_strip_comment(raw).rstrip() for raw in lines]
+    groups = sum(group_delta(body) for body in bodies) == 0
+
     out: list[tuple[int, str]] = []
     buffer = ""
     start = 0
-    for number, raw in enumerate(script.split("\n"), 1):
-        body = _strip_comment(raw).rstrip()
+    depth = 0
+    separate = False
+    for number, body in enumerate(bodies, 1):
         stripped = body.strip()
         if not buffer:
             if not stripped:
@@ -118,13 +265,24 @@ def logical_lines(script: str) -> list[tuple[int, str]]:
             start = number
         if body.endswith("\\"):
             buffer += body[:-1].strip() + " "
+            if groups:
+                depth += group_delta(body[:-1])
             continue
+        if separate and stripped:
+            buffer += "; "
+        separate = False
         buffer += stripped
-        if re.search(r"(?:\|\||&&|&|\||;|\{)$", buffer):
+        if groups:
+            depth += group_delta(body)
+        if _OPEN.search(buffer) or (depth > 0 and _OPEN_KEYWORD.search(buffer)):
             buffer += " "
+            continue
+        if depth > 0:
+            separate = True
             continue
         out.append((start, buffer.strip()))
         buffer = ""
+        depth = 0
     if buffer.strip():
         out.append((start, buffer.strip()))
     return out
