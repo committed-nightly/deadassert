@@ -36,6 +36,13 @@ actually use:
   that takes the advice ends up with a tool that reads almost none of its
   assertions and does not currently admit it.
 * `jq -e` -- the one jq invocation whose exit status is a verdict.
+* `in function` -- a matcher inside a shell function body. The one shape
+  here that `deadassert` could read and declines to: whether the body's
+  verdict reaches the step depends on where the function is called, which
+  `shell.scan` does not work out (logbook#66). It used to be silent about
+  them, which is worse than either answer -- a repository whose guards all
+  live in functions reported `Every assertion here fails when the thing it
+  names stops being true.` over a file it had not read.
 
 `test "$s" -eq 0` and `[ -f x ]` are deliberately **not** counted, per the
 caveat on `logbook#69`. They are the most common assertion in the org and
@@ -91,7 +98,7 @@ class Unread:
 
     #: 1-based, within the script.
     line: int
-    #: One of `assert`, `diff`, `jq -e`.
+    #: One of `assert`, `diff`, `jq -e`, `in function`.
     kind: str
     #: The line it was found in, stripped, as one line.
     text: str
@@ -222,9 +229,59 @@ def _commands(script: str) -> list[Unread]:
     return found
 
 
+def _in_functions(script: str) -> list[Unread]:
+    """Matchers inside a function body, on the physical line they sit on.
+
+    Physical lines, like `_asserts` and for the same reason: the body is one
+    logical line once `shell.logical_lines` has joined it, and a reader sent
+    to the `name() {` line to look at a grep three lines below it will not
+    thank us.
+
+    Two exclusions, the same two `shell.scan` applies to a matcher it does
+    read: a producing flag (`-o`, `-c`, `-l`) means the command is being run
+    for its output, and `$(...)` means it is feeding a variable. Everything
+    else in a function body is announced. Over-announcing here costs a line
+    of output; under-announcing is the defect this exists to fix.
+    """
+    found: list[Unread] = []
+    spans = shell.function_spans(script)
+    if not spans:
+        return []
+    lines = script.split("\n")
+    for first, last, _name in spans:
+        for number in range(first, min(last, len(lines)) + 1):
+            text = lines[number - 1].strip()
+            if not text or text.startswith(_COMMENT):
+                continue
+            body = text
+            if number == first:
+                # `check() { grep -q x f; }` -- the definition's own prefix
+                # hides the first command behind a head word that is the
+                # function's name.
+                head = shell.FUNCTION.match(text)
+                if head:
+                    body = text[head.end() :]
+            for offset, segment in _simple_commands(body):
+                command = shell.command_head(segment, shell.MATCHERS)
+                if command is None:
+                    continue
+                words = shell.split(command[0])
+                if words is None:
+                    continue
+                if shell.in_substitution(body, offset):
+                    continue
+                if shell.parse_matcher(words)[4]:
+                    continue
+                found.append(Unread(line=number, kind="in function", text=text))
+    return found
+
+
 def scan(script: str) -> list[Unread]:
     """Every assertion-shaped construct in `script` that `shell.scan` ignores.
 
     Sorted by line, so the report reads in file order.
     """
-    return sorted(_asserts(script) + _commands(script), key=lambda item: item.line)
+    return sorted(
+        _asserts(script) + _commands(script) + _in_functions(script),
+        key=lambda item: item.line,
+    )

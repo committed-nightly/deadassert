@@ -170,3 +170,57 @@ jq -e '.ok' r.json
 """
         assert [item.line for item in unread.scan(script)] == [2, 4, 6]
         assert kinds(script) == ["diff", "assert", "jq -e"]
+
+
+class TestInFunction:
+    """logbook#66: matchers in a function body were read by neither half.
+
+    `shell.scan` skipped them (silently, and not even consistently) and this
+    module did not know about them, so a file whose guards all live in
+    functions got an all-clear measured over nothing.
+    """
+
+    def test_the_logbook_66_instance(self):
+        # Verbatim shape from unbuilt's ci.yml, the file this was found in.
+        script = """
+no_diagnostic_on_stdout() {
+  if grep -qF 'unbuilt: ' out.txt; then
+    echo "diagnostic reached stdout:" >&2
+    exit 1
+  fi
+}
+
+run_typo
+no_diagnostic_on_stdout
+"""
+        assert kinds(script) == ["in function"]
+
+    def test_the_line_is_the_matcher_not_the_definition(self):
+        # A reader sent to the `name() {` line to look at a grep three lines
+        # below it will not thank us.
+        script = "guard() {\n  echo x\n  grep -q 'y' f\n}\nguard"
+        assert one(script).line == 3
+
+    def test_a_one_line_definition_is_found_too(self):
+        # The definition's own prefix hides the first command behind a head
+        # word that is the function's name.
+        assert kinds("check() { grep -q 'y' f && exit 1; }") == ["in function"]
+
+    def test_a_matcher_outside_any_function_is_not_counted(self):
+        # It is read properly by shell.scan; counting it here would double it.
+        assert kinds("grep -q 'y' f") == []
+
+    def test_a_function_with_no_matcher_is_not_counted(self):
+        assert kinds("flat() {\n  tr '\\n' ' ' <\"$1\" | tr -s ' '\n}") == []
+
+    def test_a_producing_matcher_in_a_body_is_not_counted(self):
+        # Run for its output, not its verdict -- the same exclusion shell.scan
+        # applies to a matcher it does read.
+        assert kinds("count() {\n  grep -c 'y' f > n.txt\n}") == []
+
+    def test_a_captured_matcher_in_a_body_is_not_counted(self):
+        assert kinds("get() {\n  line=$(grep 'y' f)\n}") == []
+
+    def test_two_matchers_in_one_body_are_two(self):
+        script = "guard() {\n  grep -q 'a' f\n  grep -q 'b' f\n}\nguard"
+        assert kinds(script) == ["in function", "in function"]
