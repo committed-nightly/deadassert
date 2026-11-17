@@ -189,6 +189,59 @@ jobs:
           assert any(c.startswith(wanted) for c in commands), commands
           PY
 
+      # logbook#73 and logbook#66, at the CLI rather than in pytest: both
+      # were about what the tool does to a whole file, and both were false
+      # on shapes this file does not itself contain.
+      #
+      # `printf` rather than a heredoc, for the reason the `exit codes` step
+      # uses it: a heredoc's lines are physical lines of *this* script, so a
+      # fixture written that way puts its greps into this repository's own
+      # assertion count, and a fixture about dead assertions would start
+      # arriving as findings against the file that built it.
+      - name: the shapes logbook#73 and logbook#66 were filed for
+        run: |
+          set -euo pipefail
+          mkdir -p shapes/.github/workflows
+          printf '%s\n' \
+            "'on': push" \
+            "jobs:" \
+            "  j:" \
+            "    steps:" \
+            "      - run: |" \
+            "          grep -qxF 'ok' out.txt" \
+            "          echo hi | grep -qxF 'ok' out.txt || {" \
+            "            echo 'absent'" \
+            "            exit 1" \
+            "          }" \
+            "          if grep -qxF 'ok' out.txt; then exit 1; fi" \
+            "      - run: |" \
+            "          guard() {" \
+            "            grep -qF 'ok' out.txt" \
+            "          }" \
+            "          guard" \
+            > shapes/.github/workflows/ci.yml
+          deadassert shapes | tee shapes.txt
+          deadassert shapes --json > shapes.json
+          python - <<'PY'
+          import json
+          d = json.load(open("shapes.json"))
+
+          # Three assertions read, not two: the multi-line `|| { ... }` is one
+          # of them, and it used to be reported `decorative` because the
+          # `exit 1` two lines down was never seen.
+          assert d["findings"] == [], d["findings"]
+          assert d["assertions"] == 3, d["assertions"]
+
+          # The one-line `if ... then exit 1; fi`. Read as `decorative` until
+          # `then` counted as a command separator, so the negated count is
+          # what pins it.
+          assert d["negated"] == 1, d["negated"]
+
+          # The guard in the function body: declined, and said so.
+          unread = [(x["kind"], x["command"]) for x in d["unread"]]
+          assert unread == [("in function", "grep -qF 'ok' out.txt")], unread
+          PY
+
       # The assertion above is only worth anything if it can go red. Break
       # one assertion in a copy of this file and check that it does.
       - name: a broken assertion in this file is caught

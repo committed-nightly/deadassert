@@ -199,7 +199,7 @@ class TestBraceGroups:
     """
 
     def test_multi_line_brace_group_is_an_assertion(self):
-        script = 'echo hi | grep -qxF \'x\' || {\n    echo "no"\n    exit 1\n  }'
+        script = "echo hi | grep -qxF 'x' || {\n    echo \"no\"\n    exit 1\n  }"
         assert polarity(script) == "needs-match"
 
     def test_single_line_brace_group_still_is(self):
@@ -212,12 +212,12 @@ class TestBraceGroups:
     def test_newlines_in_the_group_become_separators(self):
         # The bug was not the joining, it was joining with a space: `_FAILING`
         # wants an `exit` that starts a command, and `"no" exit 1` does not.
-        script = 'grep -qF \'x\' f || {\n  echo "no"\n  exit 1\n}'
-        assert one(script).text == 'grep -qF \'x\' f || { echo "no"; exit 1; }'
+        script = "grep -qF 'x' f || {\n  echo \"no\"\n  exit 1\n}"
+        assert one(script).text == "grep -qF 'x' f || { echo \"no\"; exit 1; }"
 
     def test_a_group_holding_only_a_message_is_still_decorative(self):
         # Fixing the join must not make every brace group look like a failure.
-        script = 'grep -qF \'x\' f || {\n  echo "just saying"\n}'
+        script = "grep -qF 'x' f || {\n  echo \"just saying\"\n}"
         assert polarity(script) == "decorative"
 
     def test_an_unclosed_brace_does_not_swallow_the_script(self):
@@ -328,7 +328,7 @@ class TestFunctionBodies:
         # matchers in there are invisible anyway -- but `pipeline_parts`
         # splits on `|`, and without the skip this one was read as a
         # top-level assertion and reported against the definition's line.
-        script = 'check() {\n  printf \'%s\' "$out" | grep -q Y || exit 1\n}\ncheck'
+        script = "check() {\n  printf '%s' \"$out\" | grep -q Y || exit 1\n}\ncheck"
         assert shell.scan(script) == []
 
     def test_a_matcher_after_the_body_is_still_read(self):

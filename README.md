@@ -164,6 +164,12 @@ stops being reported.
   verdict reached by `diff`, `test` or a language's own assert is not read —
   which is a reason to prefer those, not a gap to fill. See below. It is no
   longer *invisible*, though: those get counted, and the count is printed.
+- **A matcher inside a shell function body is not read.** Whether its
+  verdict reaches the step depends on where the function is *called* — bare
+  under `set -e` it does, in an `if` condition it does not, and an uncalled
+  function asserts nothing at all. That is not worked out here, so the body
+  is declined rather than half-read, and every matcher in one is printed
+  under `not read:`.
 - **`unwitnessed` is a smell, not a proof.** It says nothing in *these
   workflows* establishes the string can appear. The proof may well live in a
   unit test, where it is arguably better placed. What the finding is really
@@ -194,7 +200,7 @@ So it counts them now:
 ```console
 $ deadassert .
 Every assertion here fails when the thing it names stops being true.
-2 assertions in 15 scripts across 1 workflow file, 0 of them negated. Not counted above: 11 assertions in 5 of those scripts (9 assert, 2 diff), listed below.
+2 assertions in 16 scripts across 1 workflow file, 0 of them negated. Not counted above: 15 assertions in 6 of those scripts (13 assert, 2 diff), listed below.
 
 not read:
   ci.yml:37   assert  assert total >= 110, f"only {total} tests collected"
@@ -202,9 +208,14 @@ not read:
   ...
 ```
 
-Three shapes, picked by counting what the workflow files in this
+Four shapes. Three were picked by counting what the workflow files in this
 organisation actually use: a language's own `assert` (nearly always Python,
-via `-c` or a heredoc), `diff` and `cmp`, and `jq -e`.
+via `-c` or a heredoc), `diff` and `cmp`, and `jq -e`. The fourth is
+`in function`, and it is the only one here that is a `grep` — a matcher in a
+function body, which this tool could read and declines to, for the reason in
+the caveat above. It was silent about those until it wasn't: two identical
+guards in one file, one at the top level and one in a function, and only the
+first was ever reported.
 
 **This decides nothing.** It does not judge whether a `diff` can fail; it
 reports that one is there and was not read. The same move the tool already
@@ -255,21 +266,22 @@ is small on purpose, and it is printed rather than hidden.
 ## Measured on something real
 
 Run across the 31 repositories of the organisation this was written in — 37
-workflow files, 360 `run:` scripts:
+workflow files, 364 `run:` scripts:
 
 | | count |
 | --- | --- |
-| assertions read | 170 |
-| negated (`needs-no-match`) | 24 |
-| `unwitnessed` | 6 |
-| `prefix` | 3 |
+| assertions read | 183 |
+| negated (`needs-no-match`) | 22 |
+| `unwitnessed` | 0 |
+| `prefix` | 0 |
 | `swallowed` / `masked` / `decorative` | 0 |
-| not read | 74, in 24 scripts |
+| not read | 79, in 24 scripts |
 
-Seven of the thirty-one repositories have at least one finding. The first
-run of this tool found 33 — 12 `unwitnessed` and 21 `prefix`, across 12
-repositories — and the 24 that have gone are a repo-at-a-time sweep, not a
-`sed`; the remaining 9 are the tail of it.
+No findings left anywhere, which is not the tool scoring zero — it is the
+end of a sweep. The first run found 33, 12 `unwitnessed` and 21 `prefix`
+across 12 repositories, and they were closed a repository at a time over
+three weeks rather than with a `sed`. The number to watch now is the last
+row, not the empty ones.
 
 The three can't-fail kinds scoring zero is the result I did not expect:
 every `|| true` in that organisation is on a *tool invocation*, deliberately
@@ -277,14 +289,14 @@ allowing a non-zero findings exit before the output is asserted, which is
 correct usage. An early version of this tool reported all of them and was
 wrong to.
 
-The last row is the one that changes how you should read the others. **74
-assertions in these files are not read at all** — 67 Python asserts, 5
-`diff`, 2 `jq -e` — against 170 that are, and they are concentrated: 15
-repositories have at least one, and 3 have nothing *but* unread assertions,
-so the verdict on them used to be `Nothing to check.` The 9 findings above
-are a verdict about the greps in this organisation, which is a smaller thing
-than it looks, and the point of printing the number is that you no longer
-have to take my word for how much smaller.
+The last row is the one that changes how you should read the others. **79
+assertions in these files are not read at all** — 71 Python asserts, 5
+`diff`, 2 `jq -e` and 1 in a function body — against 183 that are, and they
+are concentrated: 15 repositories have at least one, and 3 have nothing
+*but* unread assertions, so the verdict on them used to be `Nothing to
+check.` An all-clear here is a verdict about the greps in this organisation,
+which is a smaller thing than it looks, and the point of printing the number
+is that you no longer have to take my word for how much smaller.
 
 `shellcheck` 0.9.0 reports none of these at default settings. With
 `--enable=all` it finds the two pipeline cases as `SC2312` (info) and
