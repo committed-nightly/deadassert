@@ -580,6 +580,8 @@ def scan(script: str) -> list[Assertion]:
     for index, (lineno, text) in enumerate(lines):
         if not any(name in text for name in MATCHERS):
             continue
+        if in_function(spans, lineno):
+            continue
 
         polarity: str | None = None
         undecided: str | None = None

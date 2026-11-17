@@ -301,3 +301,42 @@ class TestOneLineIf:
     def test_then_false_and_then_return_also_fail(self):
         assert polarity("if grep -q 'y' f; then false; fi") == "needs-no-match"
         assert polarity("if grep -q 'y' f; then return 1; fi") == "needs-no-match"
+
+
+class TestFunctionBodies:
+    """logbook#66: `scan` declines a function body rather than half-reading it.
+
+    `unread.scan` announces what is declined -- see tests/test_unread.py. The
+    contract here is only that nothing in a body is silently treated as
+    top-level code, because whether it reaches the step depends on where the
+    function is called and this module does not work that out.
+    """
+
+    def test_a_matcher_in_a_function_body_is_not_an_assertion(self):
+        script = "guard() {\n  if grep -q 'y' f; then exit 1; fi\n}\nguard"
+        assert shell.scan(script) == []
+
+    def test_nor_on_a_body_line_below_the_definition(self):
+        # Before this, the first body line was joined to `name() {` and the
+        # rest were read as though they were top-level code.
+        script = "guard() {\n  echo x\n  grep -q 'y' f\n}\nguard"
+        assert shell.scan(script) == []
+
+    def test_nor_one_the_joined_line_would_have_surfaced(self):
+        # The case the skip is actually load bearing for. The body is one
+        # logical line whose head word is the function's name, so most
+        # matchers in there are invisible anyway -- but `pipeline_parts`
+        # splits on `|`, and without the skip this one was read as a
+        # top-level assertion and reported against the definition's line.
+        script = 'check() {\n  printf \'%s\' "$out" | grep -q Y || exit 1\n}\ncheck'
+        assert shell.scan(script) == []
+
+    def test_a_matcher_after_the_body_is_still_read(self):
+        script = "guard() {\n  grep -q 'y' f\n}\nguard\ngrep -qF 'after' out.txt"
+        assert [a.pattern for a in shell.scan(script)] == ["after"]
+
+    def test_spans_cover_both_definition_forms(self):
+        assert shell.function_spans("f() {\n  :\n}") == [(1, 3, "f")]
+        assert shell.function_spans("function f {\n  :\n}") == [(1, 3, "f")]
+        assert shell.function_spans("f() { :; }") == [(1, 1, "f")]
+        assert shell.function_spans("echo not-a-function") == []
