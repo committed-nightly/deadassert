@@ -240,3 +240,64 @@ class TestBraceGroups:
             "exit 1",
             "fi",
         ]
+
+
+class TestOneLineIf:
+    """An `if` must read the same whether it is written on one line or four.
+
+    logbook#73's blindness again, one newline earlier: `_FAILING` wanted a
+    `;`, `&&`, `|`, `{` or `(` in front of the `exit`, and in
+    `if grep -q x f; then exit 1; fi` what is in front of it is `then`. The
+    only statement in the branch was invisible, so a working negated guard --
+    the shape this tool exists to judge -- read as `decorative`.
+    """
+
+    SHAPES = [
+        ("then exits", "if grep -q 'y' f; then exit 1; fi", "if grep -q 'y' f; then\n  exit 1\nfi"),
+        (
+            "bang, then exits",
+            "if ! grep -q 'y' f; then exit 1; fi",
+            "if ! grep -q 'y' f; then\n  exit 1\nfi",
+        ),
+        (
+            "then exits, else does not",
+            "if grep -q 'y' f; then exit 1; else :; fi",
+            "if grep -q 'y' f; then\n  exit 1\nelse\n  :\nfi",
+        ),
+        (
+            "else exits, then does not",
+            "if grep -q 'y' f; then :; else exit 1; fi",
+            "if grep -q 'y' f; then\n  :\nelse\n  exit 1\nfi",
+        ),
+        (
+            "both branches exit",
+            "if grep -q 'y' f; then exit 1; else exit 2; fi",
+            "if grep -q 'y' f; then\n  exit 1\nelse\n  exit 2\nfi",
+        ),
+        (
+            "neither branch can fail",
+            "if grep -q 'y' f; then echo noted; fi",
+            "if grep -q 'y' f; then\n  echo noted\nfi",
+        ),
+    ]
+
+    @pytest.mark.parametrize("name,inline,spread", SHAPES, ids=[s[0] for s in SHAPES])
+    def test_one_line_reads_as_the_spread_form(self, name, inline, spread):
+        folded = one(inline)
+        opened = one(spread)
+        assert (folded.polarity, folded.undecided) == (opened.polarity, opened.undecided)
+
+    def test_the_shape_itself(self):
+        # Spelled out rather than left to the comparison above, so that a
+        # change making *both* forms wrong cannot pass this file.
+        assert polarity("if grep -q 'y' f; then exit 1; fi") == "needs-no-match"
+
+    def test_an_exit_is_not_credited_to_the_wrong_branch(self):
+        # The dangerous half: a one-line `if` holds both branches, and
+        # crediting the `exit` to the other one inverts the polarity, which
+        # is worse than the `decorative` it replaced.
+        assert polarity("if grep -q 'y' f; then :; else exit 1; fi") == "needs-match"
+
+    def test_then_false_and_then_return_also_fail(self):
+        assert polarity("if grep -q 'y' f; then false; fi") == "needs-no-match"
+        assert polarity("if grep -q 'y' f; then return 1; fi") == "needs-no-match"

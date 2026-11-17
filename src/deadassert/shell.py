@@ -47,7 +47,16 @@ QUIET = ("q", "s")
 #: Polarities for which the step's pass/fail actually depends on the match.
 LIVE = ("needs-match", "needs-no-match")
 
-_FAILING = re.compile(r"(?:^|[;&|{(]\s*)(?:exit\s+[1-9]|exit\s*$|false\b|return\s+[1-9])")
+#: A command that fails the step, at the start of a command list. The
+#: keyword alternative is not decoration: `then` and `do` separate commands
+#: exactly as `;` does, so without it the only statement in
+#: `if grep -q x f; then exit 1; fi` is invisible and a working guard reads
+#: as `decorative`. Found while fixing logbook#73, which is the same
+#: blindness one newline further along.
+_FAILING = re.compile(
+    r"(?:^|[;&|{(]\s*|\b(?:then|else|do)\s+)"
+    r"(?:exit\s+[1-9]|exit\s*$|false\b|return\s+[1-9])"
+)
 _SWALLOW = re.compile(r"\|\|\s*(?:true\b|:\s*(?:;|$))")
 _LONG_PRODUCING = ("--only-matching", "--count", "--files-with-matches", "--files-without-match")
 
@@ -105,7 +114,7 @@ _GROUP_OPEN_AFTER = " \t;&|("
 
 #: A function definition: `name() {`, `function name {`, either with a body
 #: that opens on the same line. Both forms are bash; the first is POSIX.
-_FUNCTION = re.compile(
+FUNCTION = re.compile(
     r"^(?:function\s+([A-Za-z_]\w*)\s*(?:\(\s*\))?|([A-Za-z_]\w*)\s*\(\s*\))\s*\{"
 )
 
@@ -184,7 +193,7 @@ def function_spans(script: str) -> list[tuple[int, int, str]]:
     for number, raw in enumerate(script.split("\n"), 1):
         body = _strip_comment(raw).rstrip()
         if depth == 0:
-            match = _FUNCTION.match(body.strip())
+            match = FUNCTION.match(body.strip())
             if match:
                 start = number
                 name = match.group(1) or match.group(2)
@@ -500,14 +509,22 @@ def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str | No
     for _, text in lines[index:]:
         for token in re.findall(r"(?:^|[;\s])(if|fi)(?=[;\s]|$)", text):
             depth += 1 if token == "if" else -1
-        if depth == 1 and (re.match(r"^(?:else|elif)\b", text) or re.search(r";\s*else\b", text)):
+        if depth == 1 and re.match(r"^(?:else|elif)\b", text):
             branch = "else"
         body = text
         head = re.match(r"^(?:el)?if\s+(.*?)(?:;\s*then\b|$)", text)
         if head and text.startswith(("if", "elif")):
             # The condition is not the branch; a matcher in it is the subject.
             body = text[head.end(1) :]
-        if _FAILING.search(body) or _bare_assertion(body):
+        # A one-line `if` carries both branches in `body`, and crediting an
+        # `exit` to the wrong one inverts the polarity -- worse than the
+        # `decorative` it replaces. Split before deciding.
+        inline = re.split(r";\s*(?:else|elif)\b", body, maxsplit=1)
+        if len(inline) == 2:
+            for part, which in zip((piece.strip() for piece in inline), ("then", "else")):
+                if _FAILING.search(part) or _bare_assertion(part):
+                    fails[which] = True
+        elif _FAILING.search(body) or _bare_assertion(body):
             fails[branch] = True
         if depth <= 0:
             break
@@ -545,8 +562,19 @@ def _split(text: str) -> list[str] | None:
 
 
 def scan(script: str) -> list[Assertion]:
-    """Every matcher command in `script` whose status reaches the step."""
+    """Every matcher command in `script` whose status reaches the step.
+
+    A matcher inside a function body is not one of them, and is skipped here
+    rather than read -- logbook#66. Whether such a matcher decides the step
+    depends on where the function is *called*: bare under `set -e` its
+    verdict reaches the step, inside an `if` condition it does not, and an
+    uncalled function asserts nothing at all. This module does not work that
+    out, so it declines, and `unread.scan` announces what was declined. What
+    it must not do is the thing it did before: read some of them, by accident,
+    on whichever body lines happened to start with a matcher.
+    """
     lines = logical_lines(script)
+    spans = function_spans(script)
     found: list[Assertion] = []
 
     for index, (lineno, text) in enumerate(lines):
