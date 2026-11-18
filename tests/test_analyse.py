@@ -213,6 +213,71 @@ class TestExpansions:
         assert analyse.analyse(root).assertions == []
 
 
+class TestDollarWithNothingToExpand:
+    """A `$` the shell cannot fill in is an anchor, and the tool can read it.
+
+    `logbook#71`: every unescaped `$` used to send the assertion to
+    `not decided`, which was 9 of the organisation's 28 undecided
+    assertions -- and all of them whole-line, anchored matches, so the
+    tool was blindest where the assertions were best written.
+    """
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            "'^  command  *nothing$'",  # whichrc ci.yml:131, a trailing anchor
+            "'^[0-9]+ findings?$'",  # blankout ci.yml:79
+            "'^python-dotenv  +ready$'",  # envdrift ci.yml:61
+            "'^a$|^b$'",  # before an alternation
+            "'(^a$)'",  # before a close paren
+            "'^a$' out.txt; grep -q 'b'",  # not even last in the line
+        ],
+    )
+    def test_a_dollar_with_no_name_after_it_is_judged(self, tmp_path, pattern):
+        root = repo(tmp_path, f"grep -q {pattern} out.txt")
+        result = analyse.analyse(root)
+        assert result.undecided == []
+        assert len(result.assertions) >= 1
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            '"$clean"',  # a name
+            '"${msg}"',  # a brace
+            '"$(cat expected.txt)"',  # a substitution
+            '"`date`"',  # a backtick, which never has a position argument
+            '"ready $1"',  # a positional, usually empty in a run: script
+            '"ready $?"',  # a special parameter
+            # blankout ci.yml:158 builds this pattern out of three quoted
+            # pieces so Actions cannot substitute it; what reaches grep is a
+            # literal `${{ ... }}`, and a `${` is still a brace expansion.
+            "'${{ steps.check.outputs.release }}'",
+        ],
+    )
+    def test_a_dollar_with_something_to_expand_stays_undecided(self, tmp_path, pattern):
+        root = repo(tmp_path, f"grep -q {pattern} out.txt")
+        result = analyse.analyse(root)
+        assert len(result.undecided) == 1, result.undecided
+        assert "shell expansion" in result.undecided[0][1]
+
+    def test_an_anchored_negated_assertion_is_now_witnessable(self, tmp_path):
+        """The point of deciding them: they can take part in the witness rule."""
+        root = repo(
+            tmp_path,
+            "grep -q '^  mode  *nothing$' expected.txt",
+            "if grep -q '^  mode  *nothing$' out.txt; then\n  exit 1\nfi",
+        )
+        result = analyse.analyse(root)
+        assert result.undecided == []
+        assert kinds(result) == []
+
+    def test_an_anchored_negated_assertion_with_no_witness_is_a_finding(self, tmp_path):
+        root = repo(tmp_path, "if grep -q '^  mode  *nothing$' out.txt; then\n  exit 1\nfi")
+        result = analyse.analyse(root)
+        assert result.undecided == []
+        assert kinds(result) == ["unwitnessed"]
+
+
 class TestCannotFail:
     @pytest.mark.parametrize(
         "step,kind",

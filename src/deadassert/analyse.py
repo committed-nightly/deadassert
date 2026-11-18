@@ -109,16 +109,36 @@ class Result:
         return not self.assertions
 
 
+#: What has to follow a `$` for the shell to fill something in: a name, a
+#: brace, a paren, or one of the special parameters. A `$` with none of these
+#: after it -- at the end of a pattern, or before `|`, `)`, `/` -- is a regex
+#: end-of-line anchor, and there is no quoting under which it expands.
+_EXPANDS_AFTER_DOLLAR = re.compile(r"[A-Za-z_{(0-9@*#?!$-]")
+
+
 def _is_expansion(pattern: str | None) -> bool:
     """Whether a pattern's value depends on something the shell fills in.
 
     `$var`, `${var}`, `$(cmd)` and backticks all mean the characters in the
     workflow file are not the characters grep is given, so nothing here can
     say what the assertion matches. A literal `\\$` is not an expansion.
+
+    A bare `$` is not one either. `'^  command  *nothing$'` ends in an anchor,
+    and an anchor has no name after it to look up -- so unlike `$clean`, there
+    is no variable it could have been and no mistake it could be hiding. This
+    is deliberately narrower than asking about the quoting: `'$GITHUB_REPOSITORY'`
+    in single quotes is literal, but an author who meant it to expand writes
+    exactly those characters, and that is the mistake `not decided` is for.
     """
     if pattern is None:
         return False
-    return bool(re.search(r"(?<!\\)[$`]", pattern))
+    for match in re.finditer(r"(?<!\\)[$`]", pattern):
+        if match.group() == "`":
+            return True
+        after = pattern[match.end() : match.end() + 1]
+        if after and _EXPANDS_AFTER_DOLLAR.match(after):
+            return True
+    return False
 
 
 def _witnesses(assertions: list[tuple[Script, Assertion]]) -> list[str]:
