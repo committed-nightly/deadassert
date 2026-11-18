@@ -245,7 +245,7 @@ class TestDollarWithNothingToExpand:
             '"$clean"',  # a name
             '"${msg}"',  # a brace
             '"$(cat expected.txt)"',  # a substitution
-            '"`date`"',  # a backtick, which never has a position argument
+            '"`date`"',  # a backtick: unlike `$`, what follows it is irrelevant
             '"ready $1"',  # a positional, usually empty in a run: script
             '"ready $?"',  # a special parameter
             # blankout ci.yml:158 builds this pattern out of three quoted

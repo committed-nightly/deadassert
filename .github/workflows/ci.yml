@@ -242,6 +242,48 @@ jobs:
           assert unread == [("in function", "grep -qF 'ok' out.txt")], unread
           PY
 
+      # logbook#71: a `$` with nothing after it is a regex anchor, and used to
+      # send the whole assertion to `not decided` as a "shell expansion". The
+      # three lines below are the three answers this has to keep apart, and
+      # the first one is 9 of the organisation's 28 undecided assertions.
+      #
+      # `printf` and `\$` for the same reason as the step above: these lines
+      # are arguments, not script, so the matchers in them stay out of this
+      # repository's own count -- which the `>= 2` assertion above would
+      # notice.
+      - name: the shapes logbook#71 was filed for
+        run: |
+          set -euo pipefail
+          mkdir -p dollars/.github/workflows
+          printf '%s\n' \
+            "'on': push" \
+            "jobs:" \
+            "  j:" \
+            "    steps:" \
+            "      - run: |" \
+            "          grep -q '^  mode  *nothing\$' out.txt" \
+            "          grep -qF \"\$clean\" out.txt" \
+            "          grep -q 'job \`publish\` is gated on it' out.txt" \
+            > dollars/.github/workflows/ci.yml
+          cat dollars/.github/workflows/ci.yml
+          deadassert dollars --json > dollars.json
+          python - <<'PY'
+          import json
+          d = json.load(open("dollars.json"))
+
+          # The trailing anchor is read: one assertion, judged, and sound.
+          assert d["assertions"] == 1, d["assertions"]
+          assert d["findings"] == [], d["findings"]
+
+          # The other two are not, and for the stated reason. `$clean` has a
+          # name after the `$`; the backticks are a substitution wherever they
+          # appear. Both stay undecided even though the quoting here makes
+          # them literal -- that is the conservatism, and it is the point.
+          where = sorted(x["where"] for x in d["undecided"])
+          assert where == ["ci.yml:7", "ci.yml:8"], where
+          assert all("shell expansion" in x["why"] for x in d["undecided"]), d["undecided"]
+          PY
+
       # The assertion above is only worth anything if it can go red. Break
       # one assertion in a copy of this file and check that it does.
       - name: a broken assertion in this file is caught
