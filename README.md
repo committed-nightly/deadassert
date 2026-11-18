@@ -159,7 +159,13 @@ stops being reported.
   is skipped, and the skip is printed, so it never reads as a pass.
 - **A pattern the shell fills in is never judged.** `grep -qF "$expected"`
   is a real assertion, but the characters in the file are not the characters
-  grep gets, so it goes in `not decided:` and is left out of the counts.
+  grep gets, so it goes in `not decided:` and is left out of the counts. A
+  `$` is only read that way when a name, a brace, a paren or a special
+  parameter follows it — a trailing `$`, as in `'^  command  *nothing$'`, is
+  a regex anchor with no name to look up, and is judged like any other
+  pattern. The quoting is deliberately *not* consulted: `'$GITHUB_REPOSITORY'`
+  in single quotes is literal, but an author who meant it to expand writes
+  exactly those characters, and that is the mistake `not decided:` is for.
 - **It only knows about matchers.** `grep`, `egrep`, `fgrep`, `rg`. A
   verdict reached by `diff`, `test` or a language's own assert is not read —
   which is a reason to prefer those, not a gap to fill. See below. It is no
