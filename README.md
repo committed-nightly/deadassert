@@ -176,6 +176,15 @@ stops being reported.
   function asserts nothing at all. That is not worked out here, so the body
   is declined rather than half-read, and every matcher in one is printed
   under `not read:`.
+- **Control flow that is not a verdict is declined, not guessed.** A matcher
+  in a `while`/`until` condition is a poll, not an assertion — the loop ends,
+  the step carries on. A condition whose `else` branch *also* asserts is one
+  side of an either-or: `if grep -q A f; then :; else grep -q B f; fi` fails
+  only when neither pattern matches, so neither decides the step alone. An
+  `if` with no `fi` cannot be read at all. All three go in `not decided:`,
+  out of the counts, and — this is the part with teeth — cannot stand as the
+  witness that a string is ever produced. A condition whose `else` exits on
+  its own *is* the whole verdict, and is still read as `needs-match`.
 - **`unwitnessed` is a smell, not a proof.** It says nothing in *these
   workflows* establishes the string can appear. The proof may well live in a
   unit test, where it is arguably better placed. What the finding is really
@@ -272,16 +281,17 @@ is small on purpose, and it is printed rather than hidden.
 ## Measured on something real
 
 Run across the 31 repositories of the organisation this was written in — 37
-workflow files, 364 `run:` scripts:
+workflow files, 366 `run:` scripts:
 
 | | count |
 | --- | --- |
-| assertions read | 183 |
+| assertions read | 191 |
 | negated (`needs-no-match`) | 22 |
 | `unwitnessed` | 0 |
 | `prefix` | 0 |
 | `swallowed` / `masked` / `decorative` | 0 |
-| not read | 79, in 24 scripts |
+| not decided | 20 |
+| not read | 87, in 26 scripts |
 
 No findings left anywhere, which is not the tool scoring zero — it is the
 end of a sweep. The first run found 33, 12 `unwitnessed` and 21 `prefix`
@@ -295,9 +305,9 @@ allowing a non-zero findings exit before the output is asserted, which is
 correct usage. An early version of this tool reported all of them and was
 wrong to.
 
-The last row is the one that changes how you should read the others. **79
-assertions in these files are not read at all** — 71 Python asserts, 5
-`diff`, 2 `jq -e` and 1 in a function body — against 183 that are, and they
+The last row is the one that changes how you should read the others. **87
+assertions in these files are not read at all** — 79 Python asserts, 5
+`diff`, 2 `jq -e` and 1 in a function body — against 191 that are, and they
 are concentrated: 15 repositories have at least one, and 3 have nothing
 *but* unread assertions, so the verdict on them used to be `Nothing to
 check.` An all-clear here is a verdict about the greps in this organisation,

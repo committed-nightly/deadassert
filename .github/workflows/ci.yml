@@ -284,6 +284,80 @@ jobs:
           assert all("shell expansion" in x["why"] for x in d["undecided"]), d["undecided"]
           PY
 
+      # logbook#77 and logbook#78: four control-flow shapes the tool
+      # recognises and cannot decide. Each one built a sentence saying so and
+      # then could not print it -- the loop condition was dropped before an
+      # `Assertion` existed, and the other three were labelled `needs-match`,
+      # which is live, counted, and usable as the witness that a string can
+      # appear.
+      #
+      # `printf` and `\$` for the same reason as the two steps above: these
+      # lines are arguments, not script, so the matchers in them stay out of
+      # this repository's own count.
+      - name: the shapes logbook#77 and logbook#78 were filed for
+        run: |
+          set -euo pipefail
+          mkdir -p branches/.github/workflows
+          printf '%s\n' \
+            "'on': push" \
+            "jobs:" \
+            "  j:" \
+            "    steps:" \
+            "      - run: |" \
+            "          if grep -q '^  over ssh  *nothing\$' rows.txt; then" \
+            "            echo 'this bash does not source it'" \
+            "          else" \
+            "            grep -q '^  over ssh  *\.bashrc\$' rows.txt" \
+            "          fi" \
+            "      - run: |" \
+            "          if grep -q 'plain row changed' rows.txt; then" \
+            "            echo noted" \
+            "          else" \
+            "            exit 1" \
+            "          fi" \
+            "      - run: |" \
+            "          while grep -q 'still building' status.txt; do" \
+            "            sleep 1" \
+            "          done" \
+            "      - run: |" \
+            "          if grep -q 'either way' out.txt; then" \
+            "            exit 1" \
+            "          else" \
+            "            echo other" \
+            "            exit 1" \
+            "          fi" \
+            "      - run: |" \
+            "          if grep -q 'unterminated' out.txt; then" \
+            "            exit 1" \
+            > branches/.github/workflows/ci.yml
+          cat branches/.github/workflows/ci.yml
+          deadassert branches | tee branches.txt
+          deadassert branches --json > branches.json
+          python - <<'PY'
+          import json
+          d = json.load(open("branches.json"))
+
+          # All four declined, each for its own stated reason. The lines
+          # matter: a reason landing on the wrong one of these would still
+          # give the right count.
+          why = {x["where"]: x["why"] for x in d["undecided"]}
+          assert sorted(why) == ["ci.yml:18", "ci.yml:22", "ci.yml:29", "ci.yml:6"], sorted(why)
+          assert "one side of an either-or" in why["ci.yml:6"], why["ci.yml:6"]
+          assert why["ci.yml:18"] == "the matcher is a loop condition, not a verdict", why
+          assert why["ci.yml:22"] == "either branch of the `if` can fail the step", why
+          assert why["ci.yml:29"] == "the `if` has no matching `fi` in this script", why
+
+          # Six matchers in the file, four declined, so these two are the
+          # ones read -- and they are the whole discrimination. Line 9 is the
+          # matcher in the either-or's `else`, which is as load bearing as it
+          # ever was. Line 12 is a condition whose `else` exits on its own:
+          # nothing gets a say in that branch, so the condition really is the
+          # verdict and `needs-match` is right. Declining line 12 as well
+          # would be the easy over-correction, and it would show up here.
+          assert d["assertions"] == 2, d["assertions"]
+          assert d["findings"] == [], d["findings"]
+          PY
+
       # The assertion above is only worth anything if it can go red. Break
       # one assertion in a copy of this file and check that it does.
       - name: a broken assertion in this file is caught
