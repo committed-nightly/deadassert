@@ -495,7 +495,7 @@ def _redirects_stdout(segment: str) -> bool:
     return bool(re.search(r"(?<![0-9<>])>{1,2}\s*\S", segment))
 
 
-def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str | None, str | None]:
+def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str, str | None]:
     """For an `if` at `index`, which branch can fail the step.
 
     A branch "can fail" if it holds an explicit `exit N`/`false`/`return N`,
@@ -529,13 +529,13 @@ def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str | No
         if depth <= 0:
             break
     if depth > 0:
-        return None, "the `if` has no matching `fi` in this script"
+        return "undecided", "the `if` has no matching `fi` in this script"
     if fails["then"] and not fails["else"]:
         return "needs-no-match", None
     if fails["else"] and not fails["then"]:
         return "needs-match", None
     if fails["then"] and fails["else"]:
-        return None, "either branch of the `if` can fail the step"
+        return "undecided", "either branch of the `if` can fail the step"
     return "decorative", None
 
 
@@ -588,10 +588,17 @@ def scan(script: str) -> list[Assertion]:
         condition = text
 
         head = re.match(r"^(?:el)?if\s+(.*?)(?:;\s*then\b|$)", text)
+        loop = re.match(r"^(?:while|until)\s+(.*?)(?:;\s*do\b|$)", text)
         if head and text.startswith(("if", "elif")):
             condition = head.group(1)
             polarity, undecided = _branch_polarity(lines, index)
-        elif re.match(r"^(?:while|until)\b", text):
+        elif loop:
+            # The keyword has to come off the front, exactly as the `if` path
+            # takes its condition out. Left on, `_matcher_head` reads `while`
+            # as the program, no matcher is found, no `Assertion` is appended,
+            # and the sentence built on the next line is thrown away with the
+            # loop variable -- logbook#77.
+            condition = loop.group(1)
             undecided = "the matcher is a loop condition, not a verdict"
             polarity = "undecided"
 

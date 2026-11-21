@@ -340,3 +340,54 @@ class TestFunctionBodies:
         assert shell.function_spans("function f {\n  :\n}") == [(1, 3, "f")]
         assert shell.function_spans("f() { :; }") == [(1, 1, "f")]
         assert shell.function_spans("echo not-a-function") == []
+
+
+class TestUndecidedReasonsAreReachable:
+    """Every sentence `scan` builds for a shape it cannot decide must print.
+
+    Three of them could not. Two were attached to an assertion that was then
+    labelled `needs-match` -- live, counted, and usable as a witness -- and
+    `analyse` only reads `undecided` when the polarity says so. The third
+    (logbook#77) was thrown away with the loop variable.
+    """
+
+    def test_a_loop_condition_is_reported(self):
+        found = one("while grep -q 'y' f; do sleep 1; done")
+        assert found.polarity == "undecided"
+        assert found.undecided == "the matcher is a loop condition, not a verdict"
+        assert found.pattern == "y"
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            "while grep -q 'y' f; do exit 1; done",
+            "until grep -q 'y' f; do sleep 1; done",
+            "while ! grep -q 'y' f; do sleep 1; done",
+            "while grep -q 'y' f\ndo\n  sleep 1\ndone",
+        ],
+    )
+    def test_every_loop_form_reaches_it(self, script):
+        assert polarity(script) == "undecided"
+
+    def test_a_loop_over_read_is_not_a_matcher_at_all(self):
+        """`while read -r f; do grep -q x "$f"; done`.
+
+        The org's only `while` is this shape. The condition holds no matcher,
+        and the matcher in the body is live under `set -e` -- so the loop
+        keyword must not drag the body into `not decided:`.
+        """
+        found = shell.scan('while read -r f; do\n  grep -q "x" "$f"\ndone')
+        assert [a.polarity for a in found] == ["needs-match"]
+
+    def test_a_producing_grep_in_a_loop_condition_is_still_not_an_assertion(self):
+        assert shell.scan("while grep -c 'y' f; do sleep 1; done") == []
+
+    def test_both_branches_able_to_fail_is_reported(self):
+        found = one("if grep -q 'A' f; then\n  exit 1\nelse\n  echo x\n  exit 1\nfi")
+        assert found.polarity == "undecided"
+        assert found.undecided == "either branch of the `if` can fail the step"
+
+    def test_an_if_with_no_fi_is_reported(self):
+        found = one("if grep -q 'A' f; then\n  exit 1\n")
+        assert found.polarity == "undecided"
+        assert found.undecided == "the `if` has no matching `fi` in this script"
