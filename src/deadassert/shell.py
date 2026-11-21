@@ -14,7 +14,7 @@ The distinction that the rest of `deadassert` is built on is **polarity**:
   output it names changes, the assertion keeps passing, forever, while no
   longer checking anything. It rots silently.
 
-Three things in here exist because the first version got them wrong against
+Four things in here exist because the first version got them wrong against
 real workflow files, and each one was a false positive rather than a miss:
 
 1. A leading `!` negates the whole **pipeline**, not the command it sits in
@@ -27,6 +27,18 @@ real workflow files, and each one was a false positive rather than a miss:
 3. `line=$(whichrc -q | grep '\\.bash_login:') || true` is a capture, not a
    swallowed assertion. The `|| true` is correct there -- no match is an
    expected answer, and the test comes later, on the variable.
+4. A branch that fails *because a second matcher missed* does not make the
+   condition the verdict. `if grep -q A f; then :; else grep -q B f; fi`
+   fails only when neither pattern matches, so neither one decides the step
+   on its own, and calling the condition `needs-match` is a claim the step
+   does not make -- logbook#78.
+
+Where a shape is recognised but cannot be decided, the assertion carries
+`polarity="undecided"` and a sentence saying why, and `analyse` prints it
+under `not decided:`. Getting that wiring wrong is quiet in a particular way:
+a reason attached to an assertion still labelled `needs-match` is never
+printed *and* the assertion is counted and may stand as a witness. Three of
+these sentences could not print at all before logbook#77 and logbook#78.
 """
 
 from __future__ import annotations
@@ -495,17 +507,37 @@ def _redirects_stdout(segment: str) -> bool:
     return bool(re.search(r"(?<![0-9<>])>{1,2}\s*\S", segment))
 
 
-def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str | None, str | None]:
+def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str, str | None]:
     """For an `if` at `index`, which branch can fail the step.
 
     A branch "can fail" if it holds an explicit `exit N`/`false`/`return N`,
     or a bare matcher assertion, which under `bash -e` fails the step by
     itself. Rule 2 in this module's docstring: leaving the second case out
     made a real `if`/`else` in `whichrc` look decorative.
+
+    *How* a branch fails is tracked separately, because it changes what the
+    condition means -- rule 4, and logbook#78. A branch that fails on its own
+    makes the condition the whole verdict. A branch that fails only when a
+    *second* matcher misses makes the two patterns alternatives, and then
+    neither one decides the step by itself.
     """
     depth = 0
     branch = "then"
+    #: Whether the branch can fail the step at all.
     fails = {"then": False, "else": False}
+    #: Whether it has a way of failing that no matcher gets a say in.
+    alone = {"then": False, "else": False}
+
+    def note(which: str, part: str) -> None:
+        asserts = _bare_assertion(part)
+        if _FAILING.search(part):
+            fails[which] = True
+            # An `exit` reached through `|| { ... }` on a matcher is that
+            # matcher's verdict, not an unconditional failure.
+            alone[which] = alone[which] or not asserts
+        if asserts:
+            fails[which] = True
+
     for _, text in lines[index:]:
         for token in re.findall(r"(?:^|[;\s])(if|fi)(?=[;\s]|$)", text):
             depth += 1 if token == "if" else -1
@@ -522,20 +554,24 @@ def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str | No
         inline = re.split(r";\s*(?:else|elif)\b", body, maxsplit=1)
         if len(inline) == 2:
             for part, which in zip((piece.strip() for piece in inline), ("then", "else")):
-                if _FAILING.search(part) or _bare_assertion(part):
-                    fails[which] = True
-        elif _FAILING.search(body) or _bare_assertion(body):
-            fails[branch] = True
+                note(which, part)
+        else:
+            note(branch, body)
         if depth <= 0:
             break
     if depth > 0:
-        return None, "the `if` has no matching `fi` in this script"
+        return "undecided", "the `if` has no matching `fi` in this script"
     if fails["then"] and not fails["else"]:
         return "needs-no-match", None
     if fails["else"] and not fails["then"]:
+        if not alone["else"]:
+            return "undecided", (
+                "the matcher is one side of an either-or: the `else` branch asserts too, "
+                "so the step fails only when neither pattern matches"
+            )
         return "needs-match", None
     if fails["then"] and fails["else"]:
-        return None, "either branch of the `if` can fail the step"
+        return "undecided", "either branch of the `if` can fail the step"
     return "decorative", None
 
 
@@ -588,10 +624,17 @@ def scan(script: str) -> list[Assertion]:
         condition = text
 
         head = re.match(r"^(?:el)?if\s+(.*?)(?:;\s*then\b|$)", text)
+        loop = re.match(r"^(?:while|until)\s+(.*?)(?:;\s*do\b|$)", text)
         if head and text.startswith(("if", "elif")):
             condition = head.group(1)
             polarity, undecided = _branch_polarity(lines, index)
-        elif re.match(r"^(?:while|until)\b", text):
+        elif loop:
+            # The keyword has to come off the front, exactly as the `if` path
+            # takes its condition out. Left on, `_matcher_head` reads `while`
+            # as the program, no matcher is found, no `Assertion` is appended,
+            # and the sentence built on the next line is thrown away with the
+            # loop variable -- logbook#77.
+            condition = loop.group(1)
             undecided = "the matcher is a loop condition, not a verdict"
             polarity = "undecided"
 

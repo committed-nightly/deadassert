@@ -323,3 +323,51 @@ class TestRefusals:
     def test_a_named_file_that_is_not_there(self, tmp_path):
         with pytest.raises(analyse.CorpusError, match="not a file"):
             analyse.analyse(".", paths=[str(tmp_path / "nope.yml")])
+
+
+class TestEitherOrDoesNotWitness:
+    """logbook#78's consequence with teeth.
+
+    A `needs-match` pattern is a witness: proof that a string can appear. One
+    side of an either-or is not proof of that -- the other side may be what
+    appears -- so while it was labelled `needs-match` it could stand as the
+    witness that suppresses a real `unwitnessed` finding somewhere else.
+    """
+
+    either_or = (
+        "if grep -q 'command over ssh  *nothing' rows.txt; then\n"
+        "  echo 'this bash does not source it'\n"
+        "else\n"
+        "  grep -q 'command over ssh  *.bashrc' rows.txt\n"
+        "fi"
+    )
+    negated = "if grep -qF 'command over ssh  *nothing' out.txt; then\n  exit 1\nfi"
+
+    def test_it_does_not_suppress_an_unwitnessed_finding(self, tmp_path):
+        result = analyse.analyse(repo(tmp_path, self.either_or, self.negated))
+        assert kinds(result) == ["unwitnessed"]
+
+    def test_an_unconditional_else_does_still_witness(self, tmp_path):
+        """The control: a condition that really is the whole verdict.
+
+        Same two steps, except the `else` exits on its own. Here the
+        condition is a genuine `needs-match` and witnessing is correct, so
+        the finding is suppressed -- and the test above is measuring the
+        either-or and not just the pattern's spelling.
+        """
+        decisive = (
+            "if grep -q 'command over ssh  *nothing' rows.txt; then\n"
+            "  echo 'this bash does not source it'\n"
+            "else\n"
+            "  exit 1\n"
+            "fi"
+        )
+        result = analyse.analyse(repo(tmp_path, decisive, self.negated))
+        assert result.findings == []
+
+    def test_it_leaves_the_counts_and_lands_in_not_decided(self, tmp_path):
+        result = analyse.analyse(repo(tmp_path, self.either_or))
+        reasons = [why for _, why in result.undecided]
+        assert len(reasons) == 1 and "either-or" in reasons[0]
+        # The else branch's own matcher is still read and still counted.
+        assert [a.pattern for _, a in result.assertions] == ["command over ssh  *.bashrc"]

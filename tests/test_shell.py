@@ -121,7 +121,13 @@ class TestBareAssertionCanFailABranch:
     `whichrc` decorative when its else branch asserts.
     """
 
-    def test_else_branch_holding_only_a_bare_grep(self):
+    def test_else_branch_holding_only_a_bare_grep_is_not_decorative(self):
+        """The `whichrc` step this rule was written for.
+
+        It must not read `decorative` -- the else branch really can fail the
+        step. It must not read `needs-match` either: that is logbook#78, and
+        `TestEitherOr` below is where the rest of this shape is pinned.
+        """
         script = (
             "if grep -q '^ ssh *nothing$' rows.txt; then\n"
             "  echo 'this bash does not source it'\n"
@@ -129,8 +135,26 @@ class TestBareAssertionCanFailABranch:
             "  grep -q '^ ssh *\\.bashrc$' rows.txt\n"
             "fi"
         )
-        found = shell.scan(script)
-        assert [a.polarity for a in found] == ["needs-match", "needs-match"]
+        condition = shell.scan(script)[0]
+        assert condition.polarity != "decorative"
+        assert condition.polarity == "undecided"
+
+    def test_else_branch_with_an_unconditional_exit_still_needs_a_match(self):
+        """The control for logbook#78, and the whole discrimination.
+
+        Nothing gets a say in whether this `else` fails, so the condition is
+        the entire verdict and `needs-match` is exactly right. Verified
+        against `bash -e`: with the pattern absent this script exits 1.
+        """
+        script = (
+            "if grep -q '^ ssh *nothing$' rows.txt; then\n"
+            "  echo 'this bash does not source it'\n"
+            "else\n"
+            "  echo 'no row' >&2\n"
+            "  exit 1\n"
+            "fi"
+        )
+        assert polarity(script) == "needs-match"
 
 
 class TestFlags:
@@ -340,3 +364,124 @@ class TestFunctionBodies:
         assert shell.function_spans("function f {\n  :\n}") == [(1, 3, "f")]
         assert shell.function_spans("f() { :; }") == [(1, 1, "f")]
         assert shell.function_spans("echo not-a-function") == []
+
+
+class TestEitherOr:
+    """`if grep A; then :; else grep B; fi` -- logbook#78.
+
+    The step fails only when *neither* pattern matches, so neither pattern
+    decides it alone. Confirmed against `bash -e` with a file holding only
+    `B`: the script exits 0, which is what makes `needs-match` on `A` a
+    false label rather than a pessimistic one.
+    """
+
+    script = "if grep -q 'A' out.txt; then\n  echo 'a note'\nelse\n  grep -q 'B' out.txt\nfi"
+
+    def test_the_condition_is_undecided_with_a_reason(self):
+        condition = shell.scan(self.script)[0]
+        assert condition.polarity == "undecided"
+        assert "either-or" in (condition.undecided or "")
+
+    def test_the_else_branch_matcher_is_still_read(self):
+        """Only the condition's label was wrong; the else branch is unchanged.
+
+        A matcher in a branch body is live if that branch runs, which this
+        module does not work out for any branch -- not a change made here.
+        """
+        found = shell.scan(self.script)
+        assert [a.pattern for a in found] == ["A", "B"]
+        assert found[1].polarity == "needs-match"
+
+    def test_an_exit_reached_through_the_else_matcher_is_still_either_or(self):
+        """`|| { exit 1; }` on the else matcher does not make it unconditional.
+
+        The `exit` is that matcher's verdict. Reading it as an unconditional
+        failure would put this shape back on `needs-match`.
+        """
+        script = (
+            "if grep -q 'A' out.txt; then\n"
+            "  echo 'a note'\n"
+            "else\n"
+            "  grep -q 'B' out.txt || { echo 'neither' >&2; exit 1; }\n"
+            "fi"
+        )
+        assert shell.scan(script)[0].polarity == "undecided"
+
+    def test_a_matcher_and_an_exit_on_one_line_is_over_declined(self):
+        """Known over-decline, pinned so it is visible rather than folklore.
+
+        `else grep -q B f; exit 1` fails whatever `B` does -- verified
+        against `bash -e`, exit 1 with `B` present -- so `needs-match` on the
+        condition is right and this declines it anyway. The multi-line
+        spelling of the same branch gets it right, because `note` is called
+        once per logical line and the `exit` arrives on its own; here both
+        commands reach it as one part. Declining is the safe direction and
+        no repository in the organisation writes it this way (0 of 37
+        workflow files), so this is filed rather than fixed: splitting a part
+        on a top-level `;` has to stay out of `|| { ... }`, which is a
+        splitter with its own edge cases and not an end-of-shift change.
+        """
+        script = "if grep -q 'A' f; then echo note; else grep -q 'B' f; exit 1; fi"
+        assert shell.scan(script)[0].polarity == "undecided"
+
+    def test_a_then_branch_that_asserts_is_left_alone(self):
+        """`if grep A; then grep B; fi` is an implication, not a disjunction.
+
+        Deliberately not changed: the step fails when `A` appears and `B`
+        does not, so `needs-no-match` on `A` is the generous-but-defensible
+        reading every branch body already gets. Pinned so that changing it
+        is a decision rather than an accident.
+        """
+        script = "if grep -q 'A' out.txt; then\n  grep -q 'B' out.txt\nfi"
+        assert shell.scan(script)[0].polarity == "needs-no-match"
+
+
+class TestUndecidedReasonsAreReachable:
+    """Every sentence `scan` builds for a shape it cannot decide must print.
+
+    Three of them could not. Two were attached to an assertion that was then
+    labelled `needs-match` -- live, counted, and usable as a witness -- and
+    `analyse` only reads `undecided` when the polarity says so. The third
+    (logbook#77) was thrown away with the loop variable.
+    """
+
+    def test_a_loop_condition_is_reported(self):
+        found = one("while grep -q 'y' f; do sleep 1; done")
+        assert found.polarity == "undecided"
+        assert found.undecided == "the matcher is a loop condition, not a verdict"
+        assert found.pattern == "y"
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            "while grep -q 'y' f; do exit 1; done",
+            "until grep -q 'y' f; do sleep 1; done",
+            "while ! grep -q 'y' f; do sleep 1; done",
+            "while grep -q 'y' f\ndo\n  sleep 1\ndone",
+        ],
+    )
+    def test_every_loop_form_reaches_it(self, script):
+        assert polarity(script) == "undecided"
+
+    def test_a_loop_over_read_is_not_a_matcher_at_all(self):
+        """`while read -r f; do grep -q x "$f"; done`.
+
+        The org's only `while` is this shape. The condition holds no matcher,
+        and the matcher in the body is live under `set -e` -- so the loop
+        keyword must not drag the body into `not decided:`.
+        """
+        found = shell.scan('while read -r f; do\n  grep -q "x" "$f"\ndone')
+        assert [a.polarity for a in found] == ["needs-match"]
+
+    def test_a_producing_grep_in_a_loop_condition_is_still_not_an_assertion(self):
+        assert shell.scan("while grep -c 'y' f; do sleep 1; done") == []
+
+    def test_both_branches_able_to_fail_is_reported(self):
+        found = one("if grep -q 'A' f; then\n  exit 1\nelse\n  echo x\n  exit 1\nfi")
+        assert found.polarity == "undecided"
+        assert found.undecided == "either branch of the `if` can fail the step"
+
+    def test_an_if_with_no_fi_is_reported(self):
+        found = one("if grep -q 'A' f; then\n  exit 1\n")
+        assert found.polarity == "undecided"
+        assert found.undecided == "the `if` has no matching `fi` in this script"
