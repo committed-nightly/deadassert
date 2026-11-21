@@ -121,7 +121,13 @@ class TestBareAssertionCanFailABranch:
     `whichrc` decorative when its else branch asserts.
     """
 
-    def test_else_branch_holding_only_a_bare_grep(self):
+    def test_else_branch_holding_only_a_bare_grep_is_not_decorative(self):
+        """The `whichrc` step this rule was written for.
+
+        It must not read `decorative` -- the else branch really can fail the
+        step. It must not read `needs-match` either: that is logbook#78, and
+        `TestEitherOr` below is where the rest of this shape is pinned.
+        """
         script = (
             "if grep -q '^ ssh *nothing$' rows.txt; then\n"
             "  echo 'this bash does not source it'\n"
@@ -129,8 +135,26 @@ class TestBareAssertionCanFailABranch:
             "  grep -q '^ ssh *\\.bashrc$' rows.txt\n"
             "fi"
         )
-        found = shell.scan(script)
-        assert [a.polarity for a in found] == ["needs-match", "needs-match"]
+        condition = shell.scan(script)[0]
+        assert condition.polarity != "decorative"
+        assert condition.polarity == "undecided"
+
+    def test_else_branch_with_an_unconditional_exit_still_needs_a_match(self):
+        """The control for logbook#78, and the whole discrimination.
+
+        Nothing gets a say in whether this `else` fails, so the condition is
+        the entire verdict and `needs-match` is exactly right. Verified
+        against `bash -e`: with the pattern absent this script exits 1.
+        """
+        script = (
+            "if grep -q '^ ssh *nothing$' rows.txt; then\n"
+            "  echo 'this bash does not source it'\n"
+            "else\n"
+            "  echo 'no row' >&2\n"
+            "  exit 1\n"
+            "fi"
+        )
+        assert polarity(script) == "needs-match"
 
 
 class TestFlags:
@@ -340,6 +364,59 @@ class TestFunctionBodies:
         assert shell.function_spans("function f {\n  :\n}") == [(1, 3, "f")]
         assert shell.function_spans("f() { :; }") == [(1, 1, "f")]
         assert shell.function_spans("echo not-a-function") == []
+
+
+class TestEitherOr:
+    """`if grep A; then :; else grep B; fi` -- logbook#78.
+
+    The step fails only when *neither* pattern matches, so neither pattern
+    decides it alone. Confirmed against `bash -e` with a file holding only
+    `B`: the script exits 0, which is what makes `needs-match` on `A` a
+    false label rather than a pessimistic one.
+    """
+
+    script = "if grep -q 'A' out.txt; then\n  echo 'a note'\nelse\n  grep -q 'B' out.txt\nfi"
+
+    def test_the_condition_is_undecided_with_a_reason(self):
+        condition = shell.scan(self.script)[0]
+        assert condition.polarity == "undecided"
+        assert "either-or" in (condition.undecided or "")
+
+    def test_the_else_branch_matcher_is_still_read(self):
+        """Only the condition's label was wrong; the else branch is unchanged.
+
+        A matcher in a branch body is live if that branch runs, which this
+        module does not work out for any branch -- not a change made here.
+        """
+        found = shell.scan(self.script)
+        assert [a.pattern for a in found] == ["A", "B"]
+        assert found[1].polarity == "needs-match"
+
+    def test_an_exit_reached_through_the_else_matcher_is_still_either_or(self):
+        """`|| { exit 1; }` on the else matcher does not make it unconditional.
+
+        The `exit` is that matcher's verdict. Reading it as an unconditional
+        failure would put this shape back on `needs-match`.
+        """
+        script = (
+            "if grep -q 'A' out.txt; then\n"
+            "  echo 'a note'\n"
+            "else\n"
+            "  grep -q 'B' out.txt || { echo 'neither' >&2; exit 1; }\n"
+            "fi"
+        )
+        assert shell.scan(script)[0].polarity == "undecided"
+
+    def test_a_then_branch_that_asserts_is_left_alone(self):
+        """`if grep A; then grep B; fi` is an implication, not a disjunction.
+
+        Deliberately not changed: the step fails when `A` appears and `B`
+        does not, so `needs-no-match` on `A` is the generous-but-defensible
+        reading every branch body already gets. Pinned so that changing it
+        is a decision rather than an accident.
+        """
+        script = "if grep -q 'A' out.txt; then\n  grep -q 'B' out.txt\nfi"
+        assert shell.scan(script)[0].polarity == "needs-no-match"
 
 
 class TestUndecidedReasonsAreReachable:
