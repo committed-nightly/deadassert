@@ -407,6 +407,23 @@ class TestEitherOr:
         )
         assert shell.scan(script)[0].polarity == "undecided"
 
+    def test_a_matcher_and_an_exit_on_one_line_is_over_declined(self):
+        """Known over-decline, pinned so it is visible rather than folklore.
+
+        `else grep -q B f; exit 1` fails whatever `B` does -- verified
+        against `bash -e`, exit 1 with `B` present -- so `needs-match` on the
+        condition is right and this declines it anyway. The multi-line
+        spelling of the same branch gets it right, because `note` is called
+        once per logical line and the `exit` arrives on its own; here both
+        commands reach it as one part. Declining is the safe direction and
+        no repository in the organisation writes it this way (0 of 37
+        workflow files), so this is filed rather than fixed: splitting a part
+        on a top-level `;` has to stay out of `|| { ... }`, which is a
+        splitter with its own edge cases and not an end-of-shift change.
+        """
+        script = "if grep -q 'A' f; then echo note; else grep -q 'B' f; exit 1; fi"
+        assert shell.scan(script)[0].polarity == "undecided"
+
     def test_a_then_branch_that_asserts_is_left_alone(self):
         """`if grep A; then grep B; fi` is an implication, not a disjunction.
 
