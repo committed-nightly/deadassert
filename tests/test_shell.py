@@ -436,6 +436,189 @@ class TestEitherOr:
         assert shell.scan(script)[0].polarity == "needs-no-match"
 
 
+class TestElifConditions:
+    r"""A matcher in an `elif` condition, and what the chain does to the one above it.
+
+    Before logbook#82 the first of these read `decorative` -- a finding kind,
+    so the tool reported a load-bearing assertion as dead. `_branch_polarity`
+    was called with the `elif`'s own index and `depth` is counted from the
+    tokens on each line, where the `if` in `elif` is preceded by `el` rather
+    than a separator. It was never counted, `if depth <= 0: break` ended the
+    walk on the first line, and the function fell through to its last line: a
+    verdict over no branches at all.
+
+    Every expectation below was taken from running the shape under `bash -e`
+    for each combination of which patterns are present in `f`, never from
+    reading the code. The exit statuses, with the file holding the patterns
+    named in each column:
+
+                               none A B C AB BC AC ABC
+        1 elif-then-exit          0 0 1 .  0  1  .   0
+        2 elif-harmless           0 0 0 .  0  0  .   0
+        3 elif-else-exit          1 0 0 .  0  0  .   0
+        4 elif-bang-then-exit     1 0 0 .  0  0  .   0
+        6 nested-if-in-elif       0 0 1 0  0  1  0   0
+        8 elif-chain-three-way    0 0 1 1  0  1  0   0
+
+    Polarity is what the condition's status does to the step *when it is
+    reached*, which is the convention the rest of the module already uses: a
+    matcher nested inside another `if` is read the same way, and an `elif` is
+    gated by the conditions above it exactly as nesting gates that one.
+    """
+
+    def test_an_elif_condition_with_a_failing_then_needs_no_match(self):
+        """logbook#82's repro. This read `decorative` before.
+
+        Shape 1: the step exits 1 exactly when `B` is present and `A` is not,
+        so `B`'s own `then` branch is the verdict and the polarity is the way
+        round that says "this rots silently if the output stops being
+        produced".
+        """
+        script = "if grep -q 'A' f; then\n  echo a\nelif grep -q 'B' f; then\n  exit 1\nfi"
+        found = {a.pattern: a for a in shell.scan(script)}
+        assert found["B"].polarity == "needs-no-match"
+        assert found["B"].polarity != "decorative"
+
+    def test_the_condition_above_it_is_gated_by_the_elif(self):
+        """The other half of logbook#82, and the half with a live polarity.
+
+        For `A`, the `exit 1` on the else-path sits behind `B`: shape 1 exits
+        0 with `A` absent and `B` absent. `needs-match` -- "the step fails
+        when the pattern is absent" -- is a claim the step does not make, and
+        it is a *live* polarity, so it counted and could stand as a witness.
+        This is logbook#78 with the second matcher one line further away.
+        """
+        script = "if grep -q 'A' f; then\n  echo a\nelif grep -q 'B' f; then\n  exit 1\nfi"
+        found = {a.pattern: a for a in shell.scan(script)}
+        assert found["A"].polarity == "undecided"
+        assert "either-or" in (found["A"].undecided or "")
+
+    def test_an_elif_whose_branches_do_nothing_is_still_decorative(self):
+        """The control. `decorative` must stay reachable through an `elif`.
+
+        Shape 2 exits 0 for every combination, so both conditions really are
+        decorative. A fix that declined every `elif` would pass the two tests
+        above and lose the finding this tool exists to report.
+        """
+        script = "if grep -q 'A' f; then\n  echo a\nelif grep -q 'B' f; then\n  echo b\nfi"
+        assert [a.polarity for a in shell.scan(script)] == ["decorative", "decorative"]
+
+    def test_an_elif_whose_else_exits_unconditionally_needs_a_match(self):
+        """Shape 3, where nothing gets a say in the `else`.
+
+        Reached with `A` absent, the step exits 1 unless `B` matches, so the
+        `elif` condition is the whole verdict from there.
+        """
+        script = (
+            "if grep -q 'A' f; then\n"
+            "  echo a\n"
+            "elif grep -q 'B' f; then\n"
+            "  echo b\n"
+            "else\n"
+            "  exit 1\n"
+            "fi"
+        )
+        found = {a.pattern: a for a in shell.scan(script)}
+        assert found["B"].polarity == "needs-match"
+
+    def test_a_negated_elif_condition_is_the_other_way_round(self):
+        """Shape 4. The `!` is handled in `scan`, but on a polarity this
+        function now actually produces -- before, it inverted `decorative`,
+        which is to say it did nothing."""
+        script = "if grep -q 'A' f; then\n  echo a\nelif ! grep -q 'B' f; then\n  exit 1\nfi"
+        found = {a.pattern: a for a in shell.scan(script)}
+        assert found["B"].polarity == "needs-match"
+
+    def test_a_nested_if_in_the_elif_body_does_not_end_the_walk(self):
+        """Shape 6. The seeded depth has to stay a real depth counter.
+
+        An `if`/`fi` pair inside the body returns to the same depth it
+        started at, so the walk must still be running when `exit 1` arrives
+        two lines later.
+        """
+        script = (
+            "if grep -q 'A' f; then\n"
+            "  echo a\n"
+            "elif grep -q 'B' f; then\n"
+            "  if true; then\n"
+            "    echo inner\n"
+            "  fi\n"
+            "  exit 1\n"
+            "fi"
+        )
+        found = {a.pattern: a for a in shell.scan(script)}
+        assert found["B"].polarity == "needs-no-match"
+
+    def test_a_three_way_chain_declines_the_middle_condition(self):
+        """Shape 8, and the reason the gating is not simply ignored.
+
+        With `A` absent the step exits 1 when `B` matches, and also when `B`
+        misses and `C` matches -- both branches of `B`'s walk can fail, which
+        is the sentence this already had. `C`, last in the chain, has nothing
+        below it and is the verdict where it is reached.
+        """
+        script = (
+            "if grep -q 'A' f; then\n"
+            "  echo a\n"
+            "elif grep -q 'B' f; then\n"
+            "  exit 1\n"
+            "elif grep -q 'C' f; then\n"
+            "  exit 1\n"
+            "fi"
+        )
+        found = {a.pattern: a for a in shell.scan(script)}
+        assert found["B"].polarity == "undecided"
+        assert found["B"].undecided == "either branch of the `if` can fail the step"
+        assert found["C"].polarity == "needs-no-match"
+
+    def test_a_then_branch_whose_only_failure_is_a_matcher_is_over_decided(self):
+        """Pinned, not fixed: logbook#89, and not an `elif` problem at all.
+
+        `alone` is tracked for both branches and read only for the `else`, so
+        the mirror of logbook#78 in the `then` branch still reports a live
+        polarity. Under `bash -e` this exits 1 only when `A` matches and `C`
+        misses -- `A` present with `C` present exits 0 -- so `needs-no-match`
+        is not true of `A`. Pinned here so the behaviour is written down
+        rather than folklore, and so fixing logbook#89 has to come past it.
+        """
+        found = {a.pattern: a for a in shell.scan("if grep -q 'A' f; then\n  grep -q 'C' f\nfi")}
+        assert found["A"].polarity == "needs-no-match"
+
+
+class TestAVerdictOverNoBranches:
+    r"""`decorative` must not be reachable from a walk that read nothing.
+
+    This is logbook#77's lesson one function up, made an invariant: a walk
+    that never got inside the block has not established that neither branch
+    can fail, and `decorative` says exactly that. It is what would have made
+    logbook#82 announce itself in `not decided:` instead of answering wrongly.
+
+    It is unreachable through `scan` today, and deliberately kept anyway.
+    `scan` only calls `_branch_polarity` on a line matching `^(?:el)?if\s+`:
+    an `elif` seeds the depth, and an `if` is matched by the depth regex on
+    its own first line. So the guard is tested by calling the function
+    directly, which is the only honest way to show the sentence can print.
+    """
+
+    def test_a_walk_that_never_entered_the_block_declines(self):
+        polarity, why = shell._branch_polarity([(1, "while grep -q 'x' f")], 0)
+        assert polarity == "undecided"
+        assert why == "the `if` structure could not be read, so no branch was examined"
+
+    def test_a_one_line_if_still_enters_its_block(self):
+        """The guard's own near-miss, caught by `TestOneLineIf`.
+
+        A one-line `if ... fi` opens and closes the block on one line, so a
+        depth read after the line says the walk was never inside it. Asked
+        per token instead. This shape is live -- the org writes it -- so the
+        first version of the guard would have turned a real `decorative` into
+        a decline.
+        """
+        found = one("if grep -q 'y' f; then echo noted; fi")
+        assert found.polarity == "decorative"
+        assert found.undecided is None
+
+
 class TestUndecidedReasonsAreReachable:
     """Every sentence `scan` builds for a shape it cannot decide must print.
 
