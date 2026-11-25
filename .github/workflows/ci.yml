@@ -242,6 +242,74 @@ jobs:
           assert unread == [("in function", "grep -qF 'ok' out.txt")], unread
           PY
 
+      # logbook#82, and the control that goes with it. Two shapes: one where
+      # the `elif` condition decides the step and one where nothing does.
+      #
+      # `negated` is what pins the fix. It counts `needs-no-match`, which is
+      # what `elif grep -q 'B'` is -- its own `then` branch exits. On `main`
+      # the walk broke on the `elif` line, the condition came out
+      # `decorative`, and this number was 0. A fix that simply declined every
+      # `elif` would also get the finding off 'B', so the second step is here
+      # to go red if `decorative` stops being reachable through one.
+      #
+      # `printf` for the same reason as the two steps around it: these lines
+      # are arguments, not script, so the matchers in them stay out of this
+      # repository's own count.
+      - name: the shapes logbook#82 was filed for
+        run: |
+          set -euo pipefail
+          mkdir -p elifs/.github/workflows
+          printf '%s\n' \
+            "'on': push" \
+            "jobs:" \
+            "  j:" \
+            "    steps:" \
+            "      - run: |" \
+            "          if grep -q 'A' f; then" \
+            "            echo a" \
+            "          elif grep -q 'B' f; then" \
+            "            exit 1" \
+            "          fi" \
+            "      - run: |" \
+            "          if grep -q 'C' f; then" \
+            "            echo c" \
+            "          elif grep -q 'D' f; then" \
+            "            echo d" \
+            "          fi" \
+            > elifs/.github/workflows/ci.yml
+
+          # Status captured rather than inherited: the control shapes are
+          # real findings, so this run exits 1 by design and `set -e` would
+          # end the step before a single assertion below ran.
+          set +e
+          deadassert elifs --json > elifs.json; status=$?
+          set -e
+          test "$status" -eq 1
+
+          python - <<'PY'
+          import json
+          d = json.load(open("elifs.json"))
+          kinds = {(f["kind"], f["pattern"]) for f in d["findings"]}
+
+          # The false positive itself. 'B' decides its step, so no finding may
+          # call it dead -- on `main` this was ("decorative", "B").
+          assert ("decorative", "B") not in kinds, kinds
+
+          # And it is read the right way round, not merely declined: `negated`
+          # counts `needs-no-match` and is 0 on `main`.
+          assert d["negated"] == 1, d["negated"]
+
+          # The condition above it, gated by the `elif`: the step exits 0 when
+          # 'A' misses and 'B' misses, so `needs-match` was a claim the step
+          # does not make. Declined, with the either-or sentence.
+          declined = {(x["where"], "either-or" in x["why"]) for x in d["undecided"]}
+          assert declined == {("ci.yml:6", True)}, d["undecided"]
+
+          # The control: `decorative` is still reachable through an `elif`.
+          assert ("decorative", "C") in kinds, kinds
+          assert ("decorative", "D") in kinds, kinds
+          PY
+
       # logbook#71: a `$` with nothing after it is a regex anchor, and used to
       # send the whole assertion to `not decided` as a "shell expansion". The
       # three lines below are the three answers this has to keep apart, and
