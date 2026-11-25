@@ -520,29 +520,75 @@ def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str, str
     makes the condition the whole verdict. A branch that fails only when a
     *second* matcher misses makes the two patterns alternatives, and then
     neither one decides the step by itself.
+
+    `elif` is the same walk with two corrections, both logbook#82. An `elif`
+    is *the subject* when the matcher is in its own condition: its branch is
+    its own `then`, and the walk has to start already inside the enclosing
+    block, because `depth` is counted from the tokens on each line and the
+    `if` in `elif` is preceded by `el` rather than a separator -- so it was
+    never counted, the walk broke on its first line, and the function fell
+    through to `decorative` over no branches at all.
+
+    An `elif` is *part of the else-path* when the matcher is in an earlier
+    condition in the same chain. A later condition holding a matcher gates
+    everything the else-path can do, so a failure reached past one is not a
+    failure "no matcher gets a say in" -- it is logbook#78's either-or with
+    the second matcher one line further away. `if A; then :; elif B; then
+    exit 1; fi` exits 1 only when `A` misses *and* `B` matches, which is not
+    what `needs-match` claims about `A`.
+
+    Polarity is what this condition's status does to the step *when it is
+    reached*, which is the convention everywhere else here: a matcher nested
+    inside another `if` is read the same way, and an `elif` is gated by the
+    conditions above it exactly as nesting gates that one.
     """
-    depth = 0
+    subject = lines[index][1]
+    #: An `elif` subject is already inside its enclosing `if`. Seeding this
+    #: is the whole of logbook#82's first half: counted from the line's own
+    #: tokens it stays 0, and `if depth <= 0: break` then ends the walk
+    #: before a single branch has been read.
+    depth = 1 if subject.startswith("elif") else 0
+    #: Whether the walk ever got inside the block it is about. A walk that
+    #: did not has established nothing, and must not report `decorative` --
+    #: logbook#77's lesson one function up, made an invariant here.
+    entered = depth >= 1
     branch = "then"
     #: Whether the branch can fail the step at all.
     fails = {"then": False, "else": False}
     #: Whether it has a way of failing that no matcher gets a say in.
     alone = {"then": False, "else": False}
+    #: Set once a later `elif` condition holds a matcher: from there on the
+    #: else-path is gated by it, so nothing it does is unconditional.
+    gated = False
 
     def note(which: str, part: str) -> None:
         asserts = _bare_assertion(part)
         if _FAILING.search(part):
             fails[which] = True
             # An `exit` reached through `|| { ... }` on a matcher is that
-            # matcher's verdict, not an unconditional failure.
-            alone[which] = alone[which] or not asserts
+            # matcher's verdict, not an unconditional failure. Neither is one
+            # reached past an `elif` condition that holds a matcher.
+            unconditional = not asserts and not (which == "else" and gated)
+            alone[which] = alone[which] or unconditional
         if asserts:
             fails[which] = True
 
-    for _, text in lines[index:]:
+    for offset, (_, text) in enumerate(lines[index:]):
         for token in re.findall(r"(?:^|[;\s])(if|fi)(?=[;\s]|$)", text):
             depth += 1 if token == "if" else -1
-        if depth == 1 and re.match(r"^(?:else|elif)\b", text):
+            # Asked per token, not per line: a one-line `if ... fi` opens and
+            # closes the block before the line ends, so a depth read after the
+            # line says the walk was never inside it. That shape is live, and
+            # `TestOneLineIf` caught this guard getting it wrong.
+            entered = entered or depth >= 1
+        # `offset` keeps the subject line out of this: an `elif` subject is
+        # its own `then` branch, and flipping on it would credit everything
+        # it does to an `else` that has not started.
+        if offset and depth == 1 and re.match(r"^(?:else|elif)\b", text):
             branch = "else"
+            condition = re.match(r"^elif\s+(.*?)(?:;\s*then\b|$)", text)
+            if condition and _bare_assertion(condition.group(1)):
+                gated = True
         body = text
         head = re.match(r"^(?:el)?if\s+(.*?)(?:;\s*then\b|$)", text)
         if head and text.startswith(("if", "elif")):
@@ -572,6 +618,8 @@ def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str, str
         return "needs-match", None
     if fails["then"] and fails["else"]:
         return "undecided", "either branch of the `if` can fail the step"
+    if not entered:
+        return "undecided", "the `if` structure could not be read, so no branch was examined"
     return "decorative", None
 
 
