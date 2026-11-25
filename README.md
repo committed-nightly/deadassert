@@ -180,8 +180,12 @@ stops being reported.
   in a `while`/`until` condition is a poll, not an assertion — the loop ends,
   the step carries on. A condition whose `else` branch *also* asserts is one
   side of an either-or: `if grep -q A f; then :; else grep -q B f; fi` fails
-  only when neither pattern matches, so neither decides the step alone. An
-  `if` with no `fi` cannot be read at all. All three go in `not decided:`,
+  only when neither pattern matches, so neither decides the step alone. The
+  same holds when the second matcher is an `elif` rather than an `else`:
+  `if grep -q A f; then :; elif grep -q B f; then exit 1; fi` fails only when
+  `A` misses *and* `B` matches, so `A` is declined — while `B`, read where it
+  is actually reached, is the verdict there and comes out `needs-no-match`. An
+  `if` with no `fi` cannot be read at all. All of those go in `not decided:`,
   out of the counts, and — this is the part with teeth — cannot stand as the
   witness that a string is ever produced. A condition whose `else` exits on
   its own *is* the whole verdict, and is still read as `needs-match`.
