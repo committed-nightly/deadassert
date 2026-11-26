@@ -178,17 +178,30 @@ stops being reported.
   under `not read:`.
 - **Control flow that is not a verdict is declined, not guessed.** A matcher
   in a `while`/`until` condition is a poll, not an assertion — the loop ends,
-  the step carries on. A condition whose `else` branch *also* asserts is one
-  side of an either-or: `if grep -q A f; then :; else grep -q B f; fi` fails
-  only when neither pattern matches, so neither decides the step alone. The
-  same holds when the second matcher is an `elif` rather than an `else`:
-  `if grep -q A f; then :; elif grep -q B f; then exit 1; fi` fails only when
-  `A` misses *and* `B` matches, so `A` is declined — while `B`, read where it
-  is actually reached, is the verdict there and comes out `needs-no-match`. An
-  `if` with no `fi` cannot be read at all. All of those go in `not decided:`,
-  out of the counts, and — this is the part with teeth — cannot stand as the
-  witness that a string is ever produced. A condition whose `else` exits on
-  its own *is* the whole verdict, and is still read as `needs-match`.
+  the step carries on. A condition whose branch *also* asserts is one side of
+  an either-or and is declined, whichever branch it is:
+  `if grep -q A f; then :; else grep -q B f; fi` fails only when neither
+  pattern matches, and `if grep -q A f; then grep -q B f; fi` fails only when
+  `A` matches and `B` misses, so in neither one does `A` decide the step
+  alone. The same holds when the second matcher is an `elif` rather than an
+  `else`: `if grep -q A f; then :; elif grep -q B f; then exit 1; fi` fails
+  only when `A` misses *and* `B` matches, so `A` is declined — while `B`, read
+  where it is actually reached, is the verdict there and comes out
+  `needs-no-match`. An `if` with no `fi` cannot be read at all. All of those
+  go in `not decided:`, out of the counts, and — this is the part with teeth —
+  cannot stand as the witness that a string is ever produced.
+
+  What is *not* declined is a branch that fails on its own. The branch is read
+  as the command list it is, so `else grep -q B f; exit 1` is the whole
+  verdict — the `exit` runs whatever `B` does — and stays `needs-match`, while
+  `else grep -q B f || { exit 1; }` is `B`'s own verdict and is declined. One
+  `;` apart, opposite answers.
+- **A matcher inside a nested `if` in the branch is not seen.** `if grep -q A
+  f; then if grep -q B f; then exit 1; fi; fi` fails only when both match, and
+  it is read as though `A` decided it alone. This is the one place the reading
+  above is still too generous, and it is known rather than fixed: the branch is
+  split into commands, and a nested `if` is one command whose condition is not
+  read. It is the next thing to do here.
 - **`unwitnessed` is a smell, not a proof.** It says nothing in *these
   workflows* establishes the string can appear. The proof may well live in a
   unit test, where it is arguably better placed. What the finding is really

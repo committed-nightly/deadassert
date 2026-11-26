@@ -266,6 +266,67 @@ class TestBraceGroups:
         ]
 
 
+class TestCommandParts:
+    r"""The splitter behind logbook#81, and the one `;` it must not split on.
+
+    `command_parts` is only interesting because of what it refuses to do.
+    Every case below is a `;` that looks like a command separator and is
+    not, and each one has a wrong answer attached to it: a `;` inside
+    `|| { ... }` yields a bare `exit 1`, which would read as a failure no
+    matcher gets a say in and put logbook#78's shape back on a live
+    polarity.
+    """
+
+    def test_a_list_splits_on_its_separators(self):
+        assert shell.command_parts("grep -q 'B' f; exit 1") == ["grep -q 'B' f", "exit 1"]
+
+    def test_a_brace_group_is_one_command(self):
+        # The case with teeth: `exit 1` here is the matcher's verdict.
+        text = "grep -q 'B' f || { echo no; exit 1; }"
+        assert shell.command_parts(text) == [text]
+
+    def test_a_nested_compound_is_one_command(self):
+        text = "if grep -q 'B' f; then exit 1; fi"
+        assert shell.command_parts(text) == [text]
+        assert shell.command_parts("while grep -q x f; do sleep 1; done") == [
+            "while grep -q x f; do sleep 1; done"
+        ]
+        assert shell.command_parts("case $x in a) echo a;; esac; exit 1") == [
+            "case $x in a) echo a;; esac",
+            "exit 1",
+        ]
+
+    def test_a_keyword_in_argument_position_opens_and_closes_nothing(self):
+        # The direction with teeth is the *opening* one: a stray `fi` only
+        # pushes the depth negative, which a `<= 0` test forgives, but a
+        # stray `if` hides the separator after it and the part goes back to
+        # being read as one blob.
+        assert shell.command_parts("echo if; exit 1") == ["echo if", "exit 1"]
+        assert shell.command_parts("echo fi; exit 1") == ["echo fi", "exit 1"]
+
+    def test_a_separator_in_quotes_or_an_expansion_is_not_one(self):
+        assert shell.command_parts("grep -q 'a;b' f; exit 1") == ["grep -q 'a;b' f", "exit 1"]
+        assert shell.command_parts("echo $(date; true); exit 1") == ["echo $(date; true)", "exit 1"]
+        assert shell.command_parts("echo ${x:-a;b}; exit 1") == ["echo ${x:-a;b}", "exit 1"]
+        assert shell.command_parts("echo `date; true`; exit 1") == ["echo `date; true`", "exit 1"]
+        assert shell.command_parts("( grep -q B f; exit 1 )") == ["( grep -q B f; exit 1 )"]
+
+    def test_a_leading_keyword_comes_off(self):
+        # Without this the branch body of a one-line `if` is a command called
+        # `then`, which is no matcher and no `exit` -- the shape that read
+        # `decorative`.
+        assert shell.command_parts("; then grep -q 'C' f; fi") == ["grep -q 'C' f", "fi"]
+        assert shell._bare_assertion(shell.command_parts("; then grep -q 'C' f")[0])
+
+    def test_the_separators_the_shell_uses_that_this_does_not(self):
+        # `&&`, `||` and `&` all separate commands. The first two make what
+        # follows conditional on a verdict, which is the distinction being
+        # read; a lone `&` is left with them because not splitting declines
+        # rather than over-claims.
+        assert shell.command_parts("grep -q B f && exit 1") == ["grep -q B f && exit 1"]
+        assert shell.command_parts("grep -q B f & exit 1") == ["grep -q B f & exit 1"]
+
+
 class TestOneLineIf:
     """An `if` must read the same whether it is written on one line or four.
 
@@ -367,12 +428,29 @@ class TestFunctionBodies:
 
 
 class TestEitherOr:
-    """`if grep A; then :; else grep B; fi` -- logbook#78.
+    r"""A branch that asserts, so the condition above it is not the verdict.
 
-    The step fails only when *neither* pattern matches, so neither pattern
-    decides it alone. Confirmed against `bash -e` with a file holding only
-    `B`: the script exits 0, which is what makes `needs-match` on `A` a
-    false label rather than a pessimistic one.
+    logbook#78 for the `else` branch, logbook#89 for the `then` branch, and
+    logbook#81 for the spelling that put both on one line. The condition
+    decides the step only when nothing in the branch it chooses gets a say,
+    and a branch body is a command list: `grep -q B f` followed by `exit 1`
+    fails whatever `B` does, while `grep -q B f || { exit 1; }` fails only
+    when `B` misses.
+
+    Every expectation here was taken from running the shape under `bash -e`
+    for each combination of which patterns `f` holds, never from reading the
+    code:
+
+                                       none A B C AB AC BC ABC
+        then, bare matcher                0 1 0 0  1  0  0   0
+        then, matcher then exit           0 1 0 .  1  1  .   1
+        else, bare matcher                1 0 1 0  0  0  0   0
+        else, matcher then exit           1 0 1 1  0  0  1   0
+
+    Row 1 is why `needs-no-match` on a `then`-branch either-or is a false
+    label: `A` present with `C` present exits 0. Row 2 is the control one
+    `;` away from it, where the `exit` is nobody's verdict and the condition
+    really is `needs-no-match`.
     """
 
     script = "if grep -q 'A' out.txt; then\n  echo 'a note'\nelse\n  grep -q 'B' out.txt\nfi"
@@ -407,33 +485,106 @@ class TestEitherOr:
         )
         assert shell.scan(script)[0].polarity == "undecided"
 
-    def test_a_matcher_and_an_exit_on_one_line_is_over_declined(self):
-        """Known over-decline, pinned so it is visible rather than folklore.
+    def test_a_matcher_and_an_exit_on_one_line_is_the_verdict(self):
+        """logbook#81: the two spellings of one `else` branch now agree.
 
-        `else grep -q B f; exit 1` fails whatever `B` does -- verified
-        against `bash -e`, exit 1 with `B` present -- so `needs-match` on the
-        condition is right and this declines it anyway. The multi-line
-        spelling of the same branch gets it right, because `note` is called
-        once per logical line and the `exit` arrives on its own; here both
-        commands reach it as one part. Declining is the safe direction and
-        no repository in the organisation writes it this way (0 of 37
-        workflow files), so this is filed rather than fixed: splitting a part
-        on a top-level `;` has to stay out of `|| { ... }`, which is a
-        splitter with its own edge cases and not an end-of-shift change.
+        `else grep -q B f; exit 1` fails whatever `B` does -- exit 1 with
+        `B` present as well as absent -- so the condition is the whole
+        verdict and `needs-match` is right. The multi-line spelling always
+        got this, because `note` is called once per logical line and the
+        `exit` arrived on its own; written on one line both commands reached
+        it as a single part, no part was free of a matcher, and the condition
+        was declined.
         """
         script = "if grep -q 'A' f; then echo note; else grep -q 'B' f; exit 1; fi"
-        assert shell.scan(script)[0].polarity == "undecided"
+        assert shell.scan(script)[0].polarity == "needs-match"
 
-    def test_a_then_branch_that_asserts_is_left_alone(self):
-        """`if grep A; then grep B; fi` is an implication, not a disjunction.
+    def test_the_multi_line_spelling_of_that_branch_agrees(self):
+        """The control for the test above: the spelling must not matter."""
+        script = "if grep -q 'A' f; then\n  echo note\nelse\n  grep -q 'B' f\n  exit 1\nfi"
+        assert shell.scan(script)[0].polarity == "needs-match"
 
-        Deliberately not changed: the step fails when `A` appears and `B`
-        does not, so `needs-no-match` on `A` is the generous-but-defensible
-        reading every branch body already gets. Pinned so that changing it
-        is a decision rather than an accident.
+    def test_a_then_branch_that_asserts_declines_the_condition(self):
+        """logbook#89, the mirror of logbook#78 and the dangerous direction.
+
+        `alone` was tracked for both branches and read only for the `else`,
+        so this reported `needs-no-match` -- a *live* polarity, counted,
+        able to stand as a witness, and feeding "every assertion here fails
+        when the thing it names stops being true". Under `bash -e` the step
+        exits 1 only when `A` matches and `B` misses: `A` present with `B`
+        present exits 0, so `B` gets a say and the condition is not the
+        verdict.
         """
         script = "if grep -q 'A' out.txt; then\n  grep -q 'B' out.txt\nfi"
+        condition = shell.scan(script)[0]
+        assert condition.polarity == "undecided"
+        assert "either-or" in (condition.undecided or "")
+        assert "`then` branch" in (condition.undecided or "")
+
+    def test_a_then_branch_matcher_is_still_read(self):
+        """The mirror of `test_the_else_branch_matcher_is_still_read`.
+
+        Only the condition's label was wrong. The matcher in the branch body
+        is as load bearing as it ever was.
+        """
+        found = shell.scan("if grep -q 'A' out.txt; then\n  grep -q 'B' out.txt\nfi")
+        assert [a.pattern for a in found] == ["A", "B"]
+        assert found[1].polarity == "needs-match"
+
+    def test_a_then_branch_that_also_exits_is_the_verdict(self):
+        """The control one `;` away, and the reason this needs a splitter.
+
+        Row 2 of the class docstring: the `exit` is nobody's verdict, so the
+        step fails exactly when `A` matches. Declining this as well would be
+        the easy over-correction -- it is the shape of every `if grep -q bad
+        out.txt; then echo ...; exit 1; fi` guard in the organisation.
+        """
+        script = "if grep -q 'A' f; then\n  grep -q 'B' f\n  exit 1\nfi"
         assert shell.scan(script)[0].polarity == "needs-no-match"
+
+    def test_a_one_line_then_branch_that_asserts_is_not_decorative(self):
+        """The same shape on one line read `decorative` -- a finding.
+
+        Worse than logbook#89's wrong label, and the same root: the body
+        arrived as `; then grep -q 'C' f; fi`, where `command_head` sees a
+        command called `then` and no matcher at all. So the branch looked
+        empty, neither branch could fail, and the tool reported a live
+        assertion as dead config.
+        """
+        found = shell.scan("if grep -q 'A' f; then grep -q 'C' f; fi")[0]
+        assert found.polarity == "undecided"
+        assert found.polarity != "decorative"
+
+    def test_a_one_line_then_branch_that_exits_is_still_the_verdict(self):
+        """And its control: the splitter must not decline this one."""
+        found = shell.scan("if grep -q 'A' f; then grep -q 'B' f; exit 1; fi")[0]
+        assert found.polarity == "needs-no-match"
+
+    def test_a_matcher_in_a_nested_condition_is_still_over_decided(self):
+        """Pinned, not fixed: the gap this change leaves, filed as logbook#90.
+
+        `if grep -q 'B' f; then exit 1; fi` is one command, so the splitter
+        correctly keeps it whole -- and `_bare_assertion` asks
+        `command_head` about it, which answers "a command called `if`". The
+        matcher in the nested condition is invisible, the `exit` looks
+        unconditional, and the outer condition reads `needs-no-match`. Under
+        `bash -e` the step exits 1 only when both patterns match, so that is
+        logbook#89's claim one level deeper. Both spellings agree on it now,
+        which they did not before.
+        """
+        nested = "if grep -q 'B' f; then exit 1; fi"
+        for script in (
+            f"if grep -q 'A' f; then\n  {nested}\nfi",
+            f"if grep -q 'A' f; then {nested}; fi",
+        ):
+            assert shell.scan(script)[0].polarity == "needs-no-match", script
+        # The `else` mirror, wrong the same way: the step exits 1 only when
+        # `A` misses and `B` matches, and `needs-match` is just as live.
+        for script in (
+            f"if grep -q 'A' f; then\n  echo x\nelse\n  {nested}\nfi",
+            f"if grep -q 'A' f; then echo x; else {nested}; fi",
+        ):
+            assert shell.scan(script)[0].polarity == "needs-match", script
 
 
 class TestElifConditions:
@@ -570,19 +721,6 @@ class TestElifConditions:
         assert found["B"].polarity == "undecided"
         assert found["B"].undecided == "either branch of the `if` can fail the step"
         assert found["C"].polarity == "needs-no-match"
-
-    def test_a_then_branch_whose_only_failure_is_a_matcher_is_over_decided(self):
-        """Pinned, not fixed: logbook#89, and not an `elif` problem at all.
-
-        `alone` is tracked for both branches and read only for the `else`, so
-        the mirror of logbook#78 in the `then` branch still reports a live
-        polarity. Under `bash -e` this exits 1 only when `A` matches and `C`
-        misses -- `A` present with `C` present exits 0 -- so `needs-no-match`
-        is not true of `A`. Pinned here so the behaviour is written down
-        rather than folklore, and so fixing logbook#89 has to come past it.
-        """
-        found = {a.pattern: a for a in shell.scan("if grep -q 'A' f; then\n  grep -q 'C' f\nfi")}
-        assert found["A"].polarity == "needs-no-match"
 
 
 class TestAVerdictOverNoBranches:

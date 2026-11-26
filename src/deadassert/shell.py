@@ -190,6 +190,131 @@ def group_delta(text: str) -> int:
     return delta
 
 
+#: Keywords that open a compound command, and the words that close one. A `;`
+#: inside one of these separates commands *inside the nested block*, not the
+#: commands of the list being read, so it must not split one.
+_BLOCK_OPEN = ("if", "while", "until", "for", "case", "select")
+_BLOCK_CLOSE = ("fi", "done", "esac")
+
+#: What may stand immediately before a word for that word to be a command
+#: rather than an argument. Without this `echo fi` closes a block.
+_COMMAND_AFTER = ";&|({"
+_COMMAND_KEYWORD = re.compile(r"(?:^|[;\s&|(){])(?:then|else|elif|do|in)$")
+
+#: A command list keeps going after `then`, `else`, `do` and `in` exactly as
+#: it does after a `;` -- the reason `_FAILING` lists them too. Stripped off
+#: the front of a part so the command behind one is visible to both.
+LEADING_KEYWORD = re.compile(r"^(?:then|else|elif|do|in)\s+")
+
+
+def _is_command(text: str, index: int) -> bool:
+    """Whether the word at `index` stands where a command can start."""
+    before = text[:index].rstrip()
+    if not before:
+        return True
+    return before[-1] in _COMMAND_AFTER or bool(_COMMAND_KEYWORD.search(before))
+
+
+def command_parts(text: str) -> list[str]:
+    """`text` split on the `;` that separate one command from the next.
+
+    The scanning rules are `group_delta`'s, for the same reason: a `;` only
+    separates commands at the top level, and not one inside quotes,
+    `$(...)`, `${...}`, backticks, a `{ ... }` group, a `(...)` subshell or a
+    nested `if`/`while`/`case`. Each part comes back stripped, with any
+    leading `then`/`else`/`do` dropped, because a part is handed to
+    `_bare_assertion` and `command_head` starts its match at the program
+    name -- `then grep -q X f` reads as a command called `then`.
+
+    Why this is a splitter and not a regex: the two shapes it has to keep
+    apart are one `;` deep each.
+
+        grep -q 'B' f; exit 1          two commands -- the exit is nobody's verdict
+        grep -q 'B' f || { echo; exit 1; }   one command -- the exit is grep's verdict
+
+    `&&` and `||` are left alone on purpose: they make what follows
+    conditional on a verdict, which is the distinction `_branch_polarity`
+    exists to read. A lone `&` separates commands too and is also left
+    alone -- not splitting declines rather than over-claims, and nothing in
+    37 workflow files backgrounds a command in a branch.
+    """
+    parts: list[str] = []
+    start = 0
+    quote: str | None = None
+    #: Closers owed to `$(`, `${` and backticks, as in `group_delta`.
+    stack: list[str] = []
+    braces = 0
+    parens = 0
+    block = 0
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        if quote:
+            if ch == quote:
+                quote = None
+            index += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            index += 1
+            continue
+        if ch == "`":
+            if stack and stack[-1] == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+            index += 1
+            continue
+        if ch == "$" and index + 1 < len(text) and text[index + 1] in "({":
+            stack.append(")" if text[index + 1] == "(" else "}")
+            index += 2
+            continue
+        if ch == "(" and stack:
+            stack.append(")")
+            index += 1
+            continue
+        if ch in ")}" and stack and stack[-1] == ch:
+            stack.pop()
+            index += 1
+            continue
+        if stack:
+            index += 1
+            continue
+        if ch == "{" and (index == 0 or text[index - 1] in _GROUP_OPEN_AFTER):
+            if text[index + 1 : index + 2] in ("", " ", "\t"):
+                braces += 1
+            index += 1
+            continue
+        if ch == "}" and (index == 0 or text[index - 1] in " \t;&("):
+            braces -= 1
+            index += 1
+            continue
+        if ch == "(":
+            parens += 1
+            index += 1
+            continue
+        if ch == ")":
+            parens = max(parens - 1, 0)
+            index += 1
+            continue
+        if ch.isalpha() or ch == "_":
+            word = re.match(r"\w+", text[index:]).group(0)
+            if _is_command(text, index):
+                if word in _BLOCK_OPEN:
+                    block += 1
+                elif word in _BLOCK_CLOSE:
+                    block -= 1
+            index += len(word)
+            continue
+        if ch == ";" and braces <= 0 and parens <= 0 and block <= 0:
+            parts.append(text[start:index])
+            start = index + 1
+        index += 1
+    parts.append(text[start:])
+    stripped = (LEADING_KEYWORD.sub("", part.strip()) for part in parts)
+    return [part for part in stripped if part]
+
+
 def function_spans(script: str) -> list[tuple[int, int, str]]:
     """`(first line, last line, name)` for each function definition.
 
@@ -562,16 +687,22 @@ def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str, str
     gated = False
 
     def note(which: str, part: str) -> None:
-        asserts = _bare_assertion(part)
-        if _FAILING.search(part):
-            fails[which] = True
-            # An `exit` reached through `|| { ... }` on a matcher is that
-            # matcher's verdict, not an unconditional failure. Neither is one
-            # reached past an `elif` condition that holds a matcher.
-            unconditional = not asserts and not (which == "else" and gated)
-            alone[which] = alone[which] or unconditional
-        if asserts:
-            fails[which] = True
+        # Asked per command, not per part. A branch body is a command list,
+        # and both questions below are about one command: `grep -q B f`
+        # followed by `exit 1` fails whatever `B` does, while
+        # `grep -q B f || { exit 1; }` fails only when `B` misses, and read
+        # as one blob those two are indistinguishable -- logbook#81.
+        for piece in command_parts(part):
+            asserts = _bare_assertion(piece)
+            if asserts:
+                fails[which] = True
+            if _FAILING.search(piece):
+                fails[which] = True
+                # An `exit` reached through `|| { ... }` on a matcher is that
+                # matcher's verdict, not an unconditional failure. Neither is
+                # one reached past an `elif` condition that holds a matcher.
+                unconditional = not asserts and not (which == "else" and gated)
+                alone[which] = alone[which] or unconditional
 
     for offset, (_, text) in enumerate(lines[index:]):
         for token in re.findall(r"(?:^|[;\s])(if|fi)(?=[;\s]|$)", text):
@@ -608,6 +739,11 @@ def _branch_polarity(lines: list[tuple[int, str]], index: int) -> tuple[str, str
     if depth > 0:
         return "undecided", "the `if` has no matching `fi` in this script"
     if fails["then"] and not fails["else"]:
+        if not alone["then"]:
+            return "undecided", (
+                "the matcher is one side of an either-or: the `then` branch asserts too, "
+                "so a match here is not on its own what fails the step"
+            )
         return "needs-no-match", None
     if fails["else"] and not fails["then"]:
         if not alone["else"]:
