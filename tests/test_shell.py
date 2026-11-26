@@ -296,9 +296,12 @@ class TestCommandParts:
             "exit 1",
         ]
 
-    def test_a_closing_word_must_stand_where_a_command_can(self):
-        # `echo fi` is an argument. Counting it would close a block that was
-        # never open and let the next `;` split inside the real one.
+    def test_a_keyword_in_argument_position_opens_and_closes_nothing(self):
+        # The direction with teeth is the *opening* one: a stray `fi` only
+        # pushes the depth negative, which a `<= 0` test forgives, but a
+        # stray `if` hides the separator after it and the part goes back to
+        # being read as one blob.
+        assert shell.command_parts("echo if; exit 1") == ["echo if", "exit 1"]
         assert shell.command_parts("echo fi; exit 1") == ["echo fi", "exit 1"]
 
     def test_a_separator_in_quotes_or_an_expansion_is_not_one(self):
@@ -575,6 +578,13 @@ class TestEitherOr:
             f"if grep -q 'A' f; then {nested}; fi",
         ):
             assert shell.scan(script)[0].polarity == "needs-no-match", script
+        # The `else` mirror, wrong the same way: the step exits 1 only when
+        # `A` misses and `B` matches, and `needs-match` is just as live.
+        for script in (
+            f"if grep -q 'A' f; then\n  echo x\nelse\n  {nested}\nfi",
+            f"if grep -q 'A' f; then echo x; else {nested}; fi",
+        ):
+            assert shell.scan(script)[0].polarity == "needs-match", script
 
 
 class TestElifConditions:

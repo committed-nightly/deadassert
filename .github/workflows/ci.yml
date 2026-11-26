@@ -426,6 +426,91 @@ jobs:
           assert d["findings"] == [], d["findings"]
           PY
 
+      # logbook#89 and logbook#81, which were one defect: both questions
+      # `_branch_polarity` asks of a branch are about one command, and a
+      # branch body was handed to them whole. On `main` this fixture produces
+      # *two false findings* rather than two wrong labels -- the polarity it
+      # invents at line 6 is live, so the line goes on to be reported
+      # `unwitnessed`, and line 15 is reported `decorative`, which says a
+      # working assertion is dead.
+      #
+      # `printf` for the reason the steps above use it: a heredoc's lines are
+      # physical lines of *this* script, and a fixture about dead assertions
+      # would arrive as findings against the file that built it.
+      - name: the shapes logbook#89 and logbook#81 were filed for
+        run: |
+          set -euo pipefail
+          mkdir -p either/.github/workflows
+          printf '%s\n' \
+            "'on': push" \
+            "jobs:" \
+            "  j:" \
+            "    steps:" \
+            "      - run: |" \
+            "          if grep -q 'either way' out.txt; then" \
+            "            grep -q 'or this way' out.txt" \
+            "          fi" \
+            "      - run: |" \
+            "          if grep -q 'the bad line' out.txt; then" \
+            "            grep -q 'and its detail' out.txt" \
+            "            exit 1" \
+            "          fi" \
+            "      - run: |" \
+            "          if grep -q 'one line either way' out.txt; then grep -q 'or that' out.txt; fi" \
+            "      - run: |" \
+            "          if grep -q 'first row' rows.txt; then echo noted; else grep -q 'second row' rows.txt; exit 1; fi" \
+            "      - run: |" \
+            "          if grep -q 'present' out.txt; then echo noted; else grep -q 'absent' out.txt || { echo neither; exit 1; }; fi" \
+            > either/.github/workflows/ci.yml
+          cat either/.github/workflows/ci.yml
+
+          # Status captured rather than inherited: line 10 is a real finding
+          # on purpose -- it is the control for the shape that must stay live
+          # -- so this run exits 1 by design and `set -e` would end the step
+          # before a single assertion below ran.
+          set +e
+          deadassert either | tee either.txt; status=$?
+          deadassert either --json > either.json
+          set -e
+          test "$status" -eq 1
+
+          python - <<'PY'
+          import json
+          d = json.load(open("either.json"))
+
+          # Lines 6 and 15 are logbook#89: the `then` branch asserts, so the
+          # step fails only when the condition matches and the branch matcher
+          # misses, and the condition is not the verdict. Line 19 is
+          # logbook#78's `else` shape, unchanged, and its own control: the
+          # `exit` there is behind `|| { ... }` on a matcher, which is one
+          # command, so splitting must not reach the `;` inside the braces.
+          why = {x["where"]: x["why"] for x in d["undecided"]}
+          assert sorted(why) == ["ci.yml:15", "ci.yml:19", "ci.yml:6"], sorted(why)
+          assert "`then` branch" in why["ci.yml:6"], why["ci.yml:6"]
+          assert "`then` branch" in why["ci.yml:15"], why["ci.yml:15"]
+          assert "`else` branch" in why["ci.yml:19"], why["ci.yml:19"]
+
+          # Line 17 is logbook#81, and it is read rather than declined: its
+          # `else` holds a matcher and then an unconditional `exit`, so the
+          # condition is the whole verdict. Not in `undecided` above, and
+          # counted here.
+          assert d["assertions"] == 4, d["assertions"]
+
+          # Line 10 is the control the whole step rests on: a `then` branch
+          # that asserts *and* exits is still `needs-no-match`, which is the
+          # shape of every real guard in this organisation. It is the one
+          # negated assertion in the file and the one finding.
+          assert d["negated"] == 1, d["negated"]
+          found = {(f["kind"], f["line"]) for f in d["findings"]}
+          assert found == {("unwitnessed", 10)}, d["findings"]
+
+          # And the two findings `main` invents, named so a regression says
+          # which one came back: the `unwitnessed` is downstream of a false
+          # live polarity, the `decorative` calls a working assertion dead.
+          assert ("unwitnessed", 6) not in found, d["findings"]
+          assert ("decorative", 15) not in found, d["findings"]
+          PY
+
       # The assertion above is only worth anything if it can go red. Break
       # one assertion in a copy of this file and check that it does.
       - name: a broken assertion in this file is caught
